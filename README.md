@@ -13,6 +13,10 @@ Content
 * `/serum_cells/`: analysis done on XX embryonic stem cells under serum conditions
 * `/EB_cells/`: analysis done on XX embryonic body cells
 
+Data
+-------
+The raw data is accessible at XXX.
+The parsed data is provided upon request.
 
 Contact
 -------
