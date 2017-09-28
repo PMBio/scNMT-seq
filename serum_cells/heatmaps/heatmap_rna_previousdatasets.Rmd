@@ -1,0 +1,132 @@
+---
+title: "NMT-seq: heatmap of expression data comparing with previous data sets"
+author: "Ricard Argelaguet"
+output: 
+  BiocStyle::html_document: 
+  fig_width: 10
+  fig_height: 8
+---
+  
+```{r load_modules, echo=FALSE, include=FALSE}
+library(data.table)
+library(purrr)
+library(scater)
+library(ggplot2)
+```
+
+```{r funcs, echo=FALSE}
+matrix.please<-function(x) {
+    m<-as.matrix(x[,-1])
+    rownames(m)<-x[[1]]
+    m
+}
+```
+
+
+```{r define_opts, echo=FALSE}
+
+## Define I/O ##
+io <- list()
+io$expr <- "/Users/ricard/data/NMT-seq/rna/parsed/sceset_merged_all.rds"
+io$metadata.file_nmt <- "/Users/ricard/data/NMT-seq/sample_info.txt"
+io$metadata.file_mt <- "/Users/ricard/data/scMT/sample_info.txt"
+io$outdir <- "/Users/ricard/NMT-seq/heatmap/out"
+
+## Define options ##
+opts <- list()
+
+# Define which cells to use
+opts$nmt_cells <- fread(io$metadata.file_nmt) %>% .[pass_rnaQC==T, sample]
+opts$mt_cells <- fread(io$metadata.file_mt) %>% .[pass_rnaQC==T, sample]
+```
+
+<!-- Load sample metadata -->
+```{r load_metadata} 
+sample_metadata_nmt <- fread(io$metadata.file_nmt) %>% .[sample %in% opts$nmt_cells] %>% .[,dataset:="This study"] %>% .[,sample:=paste0(sample,"_NMT")] %>% .[,c("pass_accQC","pass_metQC","pass_rnaQC","index"):=NULL] %>%
+  .[,c("sample","culture","method","dataset")]
+
+sample_metadata_mt <- fread(io$metadata.file_mt) %>% .[sample %in% opts$mt_cells] %>% .[,dataset:="Angermueller"] %>% .[,sample:=paste0(sample,"_Angermueller")] %>% .[,method:="MT"] %>% .[,c("pass_metQC","pass_rnaQC"):=NULL] %>%
+  .[,c("sample","culture","method","dataset")]
+
+sample_metadata <- rbind(sample_metadata_nmt, sample_metadata_mt) %>% setorder(-culture,dataset)
+```
+
+```{r load_data, echo=FALSE}
+
+# Load expression data
+sce <- readRDS(io$expr)[,sample_metadata$sample]
+
+```
+
+
+```{r filter, echo=FALSE}
+
+# Filter genes based on dropout
+opts$max.dropout <- 0.25
+genes_dropout <- rownames(sce)[fData(sce)$pct_dropout<(opts$max.dropout*100)]
+sce_filt <- sce[genes_dropout,]
+
+# Filter genes based on variance
+# opts$fvar <- 0.1
+# genes_var <- names(tail(sort(apply(exprs(sce_filt),1,var)), n=nrow(sce_filt)*opts$fvar))
+# sce_filt <- sce_filt[genes_var,]
+ 
+# Filter genes based on biological overdispersion
+opts$fvar <- 0.5
+# genes_var <- rownames(sce_filt)[tail(sort(fData(sce_filt)$bioVar, index.return=TRUE)$ix, n=nrow(sce_filt)*opts$fvar)]
+# sce_filt <- sce_filt[genes_var,opts$cells]
+genes_oversdispersion <- rownames(sce_filt)[fData(sce_filt)$bioVar > 1]
+sce_filt <- sce_filt[genes_oversdispersion,]
+
+```
+
+<!-- ```{r convert2matrix, echo=FALSE} -->
+<!-- rna_matrix <- rna[,c("sample","gene","expr")] %>% dcast(sample~gene, value.var="expr") %>% matrix.please -->
+<!-- ``` -->
+
+# Unsupervised
+```{r unsupervised_heatmap, echo=FALSE}
+
+annotation_row <- data.frame(
+  row.names = sample_metadata$sample,
+  culture = sample_metadata$culture,
+  method = sample_metadata$method,
+  dataset = sample_metadata$dataset
+)
+# heatmap.2(t(exprs(sce_filt)), col=colorRampPalette(rev(brewer.pal(n = 7, name =
+# "RdYlBu")))(100), na.color = "gray95", Rowv=T, Colv=T, density.info="none", trace="none",
+#           key=T, labRow = FALSE, labCol = FALSE)
+
+# pdf(paste0(io$outdir,"/heatmap_rna_comparison_unsupervised.pdf"), width = 6.5, height = 4.5)
+pheatmap::pheatmap(t(exprs(sce_filt)),
+                   cluster_rows = F, cluster_cols = T, annotation_row = annotation_row, annotation_col = NA,
+                   show_colnames = F, show_rownames = F)
+# dev.off()
+```
+
+
+# Supervised
+
+## Marker genes
+```{r load_genes, echo=FALSE}
+pluri <- fread("/Users/ricard/NMT-seq/genesets/pluripotency.tsv", header=F) %>% setnames(c("ens_id","gene")) %>% .[["gene"]]
+diff <- fread("/Users/ricard/NMT-seq/genesets/differentiation.tsv", header=F) %>% setnames(c("ens_id","gene")) %>% .[["gene"]]
+housek <- fread("/Users/ricard/NMT-seq/genesets/housekeeping.tsv", header=F) %>% setnames(c("ens_id","gene")) %>% .[["gene"]]
+```
+
+### Heatmap
+```{r supervised_heatmap, echo=FALSE, include=TRUE}
+
+feature_df <- data.frame(gene=c(pluri,diff,housek), class=c(rep("Pluripotency",length(pluri)),rep("Differentiation",length(diff)),rep("Housekeeping",length(housek)))) %>% tibble::column_to_rownames("gene")
+sample_df <- data.frame(sample=colnames(sce), dataset=sce$dataset, method=sce$method, culture=sce$culture) %>% tibble::column_to_rownames("sample")
+
+# annotation_colors	<- list(culture=c("red","green"), method=c("blue","orange"), )
+
+pdf(paste0(io$outdir,"/heatmap_rna_comparison_SUPERVISED.pdf"), width = 6.5, height = 4.5)
+pheatmap::pheatmap(t(exprs(sce)[rownames(feature_df),]), border_color="black", main="",
+         cluster_cols=F, cluster_rows=F, show_rownames=FALSE, show_colnames=FALSE,
+         annotation_row=sample_df, annotation_col=feature_df, annotation_colors=NA,
+         legend=TRUE, annotation_legend=TRUE, legend_labels=NA,
+         annotation_names_col=F, fontsize=13)
+dev.off()
+```

@@ -1,0 +1,608 @@
+---
+title: "NMT-Seq: Association between accessibility conservation and expression"
+output: 
+  BiocStyle::html_document: 
+    fig_width: 12
+    fig_height: 8
+---
+
+```{r echo=FALSE, include=FALSE}
+suppressPackageStartupMessages(library(BPRMeth))
+suppressPackageStartupMessages(library(scater))
+suppressPackageStartupMessages(library(purrr))
+suppressPackageStartupMessages(library(weights))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(cowplot))
+suppressPackageStartupMessages(library(gridExtra))
+suppressPackageStartupMessages(library(scales))
+suppressPackageStartupMessages(library(grid))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(truncnorm))
+```
+
+```{r echo=FALSE, include=FALSE}
+# Define ggplot2 theme for scatter plots
+scatter_theme <- function(){
+  p <- theme(
+      plot.title=element_text(size=28, face='bold', margin=margin(0,0,10,0), hjust=0.5),
+      plot.subtitle = element_text(size=20, face='bold', margin=margin(0,0,10,0), hjust=0.5),
+      axis.text=element_text(size=rel(1.75), color='black'),
+      axis.title=element_text(size=rel(1.95), color='black'),
+      axis.title.y = element_text(margin=margin(0,10,0,0)),
+      axis.title.x = element_text(margin=margin(10,0,0,0)),
+      legend.position="right",
+      panel.border=element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank()
+    )
+}
+
+# Scatter plot function
+scatter_plot <- function(data, xlabel="", ylabel="", title="", subtitle="", lm=FALSE, loess = FALSE) {
+  p <- ggplot(data, aes_string(x=names(data)[1], y=names(data)[2], col=names(data)[3])) +
+    labs(x=xlabel, y=ylabel, title=title, subtitle=subtitle) +
+    geom_point(shape = 16, size = 2.5, show.legend = FALSE, alpha = .55) + 
+    scatter_theme() + 
+    scale_color_gradient(low = "#0091ff", high = "#f0650e")
+  if (lm){
+    if (loess){ p <- p + geom_smooth() }#+ scale_x_continuous(trans = "log1p")
+    else{ p <- p + geom_smooth(method='lm') }
+  }
+}
+
+# Define ggplot2 boxplot theme for boxplots
+boxplot_theme <- function() {
+  p <- theme(
+    plot.title = element_text(size=30, hjust=0.5, margin=margin(0,0,20,0)),
+    axis.title.y = element_text(colour="black", size=20, vjust=1.5),
+    axis.title.x = element_text(colour="black", size=20, vjust=1.5, margin=margin(15,0,0,0)),
+    axis.text.x = element_text(colour="black",size=rel(1.6)),
+    axis.text.y = element_text(colour="black",size=rel(1.6)),
+    axis.line = element_line(colour="black", size=rel(0.7)),
+    axis.ticks.x = element_line(colour="black", size=rel(0.8)),
+    axis.ticks.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid = element_blank(),
+    legend.position="none",
+    legend.text=element_text(size=15),
+    legend.title=element_blank(),
+    legend.background=element_blank(),
+    panel.border = element_blank()
+  )
+}
+
+# Define ggplot2 boxplot theme for boxplots
+barplot_theme <- function() {
+  p <- theme(
+    plot.title = element_text(size=30, hjust=0.5, margin=margin(0,0,20,0)),
+    axis.title.y = element_text(colour="black", size=20, vjust=1.5),
+    axis.title.x = element_text(colour="black", size=20, vjust=1.5, margin=margin(15,0,0,0)),
+    axis.text.x = element_text(colour="black",size=rel(1.6)),
+    axis.text.y = element_text(colour="black",size=rel(1.6)),
+    axis.line = element_line(colour="black", size=rel(0.7)),
+    axis.ticks.x = element_line(colour="black", size=rel(0.8)),
+    axis.ticks.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid = element_blank(),
+    legend.position="right",
+    legend.text=element_text(size=13),
+    legend.title=element_text(size=18),
+    legend.background=element_blank(),
+    panel.border = element_blank()
+  )
+}
+
+# Define ggplot2 boxplot theme for boxplots
+barplot_multi_theme <- function() {
+  p <- theme(
+    plot.title = element_text(size=30, hjust=0.5, margin=margin(0,0,20,0)),
+    axis.title.y = element_text(colour="black", size=20, vjust=1.5),
+    axis.title.x = element_text(colour="black", size=20, vjust=1.5, margin=margin(15,0,0,0)),
+    axis.text.x = element_text(colour="black",size=rel(1.2)),
+    axis.text.y = element_text(colour="black",size=rel(1.5)),
+    axis.line = element_line(colour="black", size=rel(0.7)),
+    axis.ticks.x = element_line(colour="black", size=rel(0.8)),
+    axis.ticks.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid = element_blank(),
+    legend.position="right",
+    legend.text=element_text(size=13),
+    legend.title=element_text(size=18),
+    legend.background=element_blank(),
+    panel.border = element_blank()
+  )
+}
+
+# Define ggplot2 theme for line plots
+line_theme <- function(){
+  p <- theme(
+      plot.title=element_text(size=25, face='bold', margin=margin(0,0,5,0), hjust=0.5),
+      axis.text=element_text(size=rel(1.15), color='black'),
+      axis.title=element_text(size=rel(1.55), color='black'),
+      axis.title.y = element_text(margin=margin(0,15,0,0)),
+      axis.title.x = element_text(margin=margin(15,0,0,0)),
+      axis.ticks.x = element_line(colour="black", size=rel(0.8)),
+      axis.ticks.y = element_blank(),
+      legend.position="right",
+      legend.key.size = unit(1.9, 'lines'),
+      legend.title=element_text(size=24, face='bold'),
+      legend.text=element_text(size=19),
+      panel.border=element_blank(),
+      panel.grid.major = element_line(colour = "gainsboro"),
+      #panel.grid.minor = element_line(colour = "grey"),
+      panel.background = element_blank()
+    )
+}
+```
+
+<!-- # Parse and filter data -->
+```{r echo=FALSE, include=FALSE}
+# Data
+io                     <- list()
+io$base_dir            <- "/home/cakapourani/Documents/Code/datasets/nmt-seq-data-eb"
+# io$base_dir          <- "/Users/ricard/data/NMT-seq"
+# io$base_dir          <- "/Users/kapouranis/Documents/Andreas/Code/datasets/nmt-seq-data"
+io$out_dir             <- "/home/cakapourani/Documents/Code/nmt-seq/rebuttal/EB/acc_conservation/out/cluster/"
+io$rna_file            <- paste0(io$base_dir, "/rna/parsed/sceset.rds")
+io$acc_file_rate       <- paste0(io$base_dir, "/acc/parsed/acc_data.tsv.gz")
+io$acc_file            <- paste0(io$base_dir, "/acc/parsed/profiles/cons_cluster_prom_200_200_basis13_GpCcov10_bic2_cellcov0.6.rds")
+io$acc_cellwise        <- paste0(io$base_dir, "/acc/parsed/profiles/cell_wise_cl_prom_200_200_basis11_GpCcov10.rds")
+io$pseudotime          <- "/home/cakapourani/Documents/Code/nmt-seq/rebuttal/EB/pseudotime/out/destiny.tsv"
+io$genelist_dir        <- paste0(io$base_dir, "/metadata")
+io$plur_genes_file     <- paste0(io$genelist_dir, "/pluripotency_extended.tsv")
+io$h3k4me3_genes_file  <- paste0(io$genelist_dir, "/H3K4me3.bed")
+io$h3k27me3_genes_file <- paste0(io$genelist_dir, "/H3K27me3.bed")
+
+opts                   <- list()
+opts$annos             <- c("prom_200_200")
+opts$min.weight        <- 10      # Minimum weight per feature (met coverage)
+opts$min.s             <- 10      # minimum number of samples to do the correlation
+opts$gene_window       <- 5e3     # window length for the overlap between genes and features
+opts$threshold         <- 5e-2    # threshold for significant hits
+opts$quan_seq          <- seq(0, 1, length.out = 6) # Discretization steps
+opts$axis_labels       <- paste0(seq(1,5))     # Discretization steps
+```
+
+<!-- # Load scRNA data -->
+```{r load_rna, echo=FALSE, include=FALSE, warning=FALSE, message=FALSE}
+# Load expression as SCESet object
+sceset        <- readRDS(file = io$rna_file)
+# Create data.table
+rna_dt        <- exprs(sceset) %>% t %>% as.data.table(keep.rownames = "sample") %>% melt(id.vars = "sample", value.name = "expr", variable.name = "gene")
+# Compute summary statistics for each gene across cells
+rna_all_stats <- rna_dt[, .(mean_expr = mean(expr), median_expr = median(expr), var_expr = var(expr), sd_expr = sd(expr), cv_expr = sd(expr)/mean(expr)), by = gene]
+N_cells       <- length(unique(rna_dt$sample))  # Number of unique cells
+rna_all_stats <- rna_all_stats[, cv_expr := log2((1 + 1/(4 * N_cells)) * cv_expr)]  # Correct CV empirically
+# Extract biological variance, i.e. overdispersion
+rna_all_stats <- rna_all_stats[, overdispersion := fData(sceset)$bioVar]
+# Extract gene coordinates metadata to do the overlap
+rna_metadata  <- fData(sceset) %>% tibble::rownames_to_column("gene") %>% as.data.table %>% .[,c("chr", "start", "end", "gene", "ens_id")]  %>% .[, chr := as.factor(sub("chr", "", chr))] %>% setnames("ens_id", "id")
+# Merge rna data with metadata
+rna_all_stats <- merge(rna_metadata[, c("chr", "id", "gene")], rna_all_stats, by = c("gene")) # Merge using all samples
+rna_dt        <- merge(rna_metadata[, c("chr", "id", "gene")], rna_dt, by = c("gene"))        # Merge using only samples that pass filtering
+rm(sceset, N_cells)
+```
+
+<!-- # Load acc rate data -->
+```{r load_acc_rate, eval=TRUE, echo=FALSE, include=FALSE, warning=FALSE, message=FALSE}
+# Load accessibility data
+acc_rate   <- fread(sprintf("zcat < %s", io$acc_file_rate)) %>% as.data.table %>% .[anno %in% opts$annos] %>% .[, rate := rate + rtruncnorm(.N, a = 0, b = Inf, mean = 0, sd = 0.01 )]
+# Keep only covered regions
+acc_rate   <- acc_rate[weight >= opts$min.weight] 
+# Filter regions not covered across cells
+keep_sites <- acc_rate[,.(n = .N), by = c("id")] %>% .[n >= opts$min.s] %>% .$id  
+acc_rate   <- acc_rate[id %in% keep_sites]
+# Compute summary statistics
+acc_rate_stats <- acc_rate[, .(mean_acc = mean(rate), median_acc = median(rate), var_acc = var(rate), sd_acc = sd(rate)), by = id] 
+rm(keep_sites)
+```
+
+<!-- # Load acc profile data -->
+```{r load_acc_prof, echo=FALSE, include=FALSE, warning=FALSE, message=FALSE}
+# Load accessibility data
+acc_profile  <- readRDS(io$acc_file) %>% .[cells > opts$min.s] 
+# Make clusters column as factor and keep accessibility groups with more than 30 genes in each cluster
+acc_profile <- acc_profile %>% .[, factor_clusters := factor(clusters)] %>% .[, N := .N, by = clusters] %>% .[N > 30]
+# Merge with expression data using all samples 
+accrna_prof <- merge(rna_all_stats, acc_profile, by = c("id")) %>% setorder(clusters) 
+rm(acc_profile)
+
+# # Process to get statistics only for cells that pass filtering
+# dt_N <- NROW(acc_profile)
+# rna_filt <- data.table(id=character(dt_N), gene=character(dt_N), mean_expr=numeric(dt_N), median_expr=numeric(dt_N), var_expr = numeric(dt_N), sd_expr = numeric(dt_N), cv_expr = numeric(dt_N))
+# # Iterate over each region
+# for (i in 1:NROW(acc_profile)){
+#   res <- rna_dt[id == acc_profile$id[i] & sample %in% acc_profile$cell_names[[i]], .(mean_expr=mean(expr), median_expr=median(expr), var_expr=var(expr), sd_expr=sd(expr), cv_expr=sd(expr)/mean(expr)), by=c("id","gene")]
+#   if (NROW(res) > 0 ){ set(rna_filt, i, 1:7, res) }
+# }
+# rna_filt    <- rna_filt %>% .[id != ""]  # Remove genes that we had no metadata information
+# accrna_filt <- merge(rna_filt, acc_profile, by = c("id")) %>% setorder(clusters) # Merge data
+# accrna_filt <- accrna_filt %>% .[, clusters := factor(clusters)] %>% .[, N := .N, by = clusters] %>% .[N > 10] # Make clusters as factors
+```
+
+<!-- # Merge all data in one data.table object -->
+```{r merge_dt, echo=FALSE, include=FALSE, warning=FALSE, message=FALSE}
+# Merge data with rate
+accrna <- merge(accrna_prof, acc_rate_stats, by = c("id")) %>% setorder(clusters)
+# Create accessibility variability levels using quartiles
+accrna <- accrna %>% .[, acc_var_levels := cut(abs(sd_acc), breaks = quantile(abs(sd_acc), probs = opts$quan_seq), labels = opts$axis_labels, include.lowest = TRUE)]
+# Create mean expression levels
+accrna <- accrna %>% .[, scaled_expr := BPRMeth:::.minmax_scaling(mean_expr, fmin = 0, fmax = 1)] %>% .[, scaled_mean_expr_levels := cut(scaled_expr, seq(0 , 1, length.out = 6), labels=c(1:5), include.lowest = TRUE)]
+# Create mean expression levels
+accrna <- accrna %>% .[, mean_expr_levels := cut(mean_expr, breaks = quantile(mean_expr, probs = opts$quan_seq), labels = opts$axis_labels, include.lowest = TRUE)]
+# Create discrete expression levels
+opts$discr_labels <- c("Zero Expr", "Low Expr", "Medium Expr", "High Expr")     # Discretization steps
+accrna <- accrna %>% .[, discr_expr_levels := cut(mean_expr, breaks = c(0 , 0.001, 2, 6, 20), labels = opts$discr_labels, include.lowest = TRUE)]
+```
+
+# Accessibility conservation and expression relationship
+
+## Using likelihood information and BIC 
+To quantify the conservation of accessibility patterns around promoters we use the likelihood information from the fitted profiles. Essentially we try and cluster the accessibility profiles of a gene across all cells. Initially, we start with one cluster, and then we increase the number of clusters $k$, by also computing the Bayesian Information Criterio (BIC). The BIC helps us to perform model selection and we choose the number of clusters k with the lowest BIC. 
+So genes with low number of clusters are more conserved in terms of their accessibility profiles. This is because with a small number of clusters we could explain all the information encoded in the profile of each cell. (__Need to explain this better, probably using a generative modelling approach this would make more sense?__)
+
+The region for the accesibility profiles is $\pm 200$ around TSS. 
+
+## Association with mean expression
+We observe that accessibility conservation around promoter regions is positively correlated with mean expression levels, i.e. genes with tightly controlled chromatin accessibility patterns have higher expression levels across cells. However when looking at accessibility rate variability and mean expression we cannot capture this signal, and they seem uncorrelated.
+```{r associate, echo=FALSE, warning=FALSE, message=FALSE}
+# Acc profile conservation - Mean expression association
+p <- ggplot(accrna[,c("factor_clusters", "mean_expr", "N")], aes(x=factor_clusters, y=mean_expr)) +
+  geom_boxplot(alpha=0.7, outlier.shape=NA, fill="#00BFC4") + geom_hline(yintercept=0, colour="black", linetype="dashed") +
+  stat_summary(fun.y = function(x){ xx <- min(x); return(xx - 0.7)}, aes(label = paste0("N=", as.character(N))), geom='text', col='black', size = 5) +
+  labs(title=NULL, x="Clusters (i.e. conservation)", y="Mean expression") + boxplot_theme()
+p
+invisible(pdf(file = paste0(io$out_dir, "box_accProfCons_exprMean.pdf"), width = 9, height = 6, useDingbats=FALSE)); p; invisible(dev.off())
+
+# Acc rate variance - Mean expression association
+p <- ggplot(accrna[,c("acc_var_levels", "mean_expr")], aes(x=acc_var_levels, y=mean_expr)) +
+  geom_boxplot(alpha=0.7, outlier.shape=NA, fill="#00BFC4") + geom_hline(yintercept=0, colour="black", linetype="dashed") +
+  labs(title=NULL, x="Accessibility rate variance", y="Mean expression") + boxplot_theme()
+p
+invisible(pdf(file = paste0(io$out_dir, "box_accRateVar_exprMean.pdf"), width = 9, height = 6, useDingbats=FALSE)); p; invisible(dev.off())
+rm(p)
+```
+
+Here we show the relationship between the accessibility conservation profiles and mean accessibility rate. In general we positive correlation: the more conserved is the accessibility between cells the higher the mean accessibility. This means that open chromatin regions tend to be more stable across cells. However when relating acc profile conservation with acc rate variability weobserve a strange association.
+```{r associate_2, echo=FALSE, warning=FALSE, message=FALSE,fig.width=9, fig.height=9}
+# Acc profile conservation - Acc rate association
+p1 <- ggplot(accrna[,c("factor_clusters", "mean_acc", "N")], aes(x=factor_clusters, y=mean_acc)) +
+  geom_boxplot(alpha=0.7, outlier.shape=NA, fill="#00BFC4") + 
+  stat_summary(fun.y = function(x){ xx <- 0; return(xx + 0.7)}, aes(label = paste0("N=", as.character(N))), geom='text', col='black', size = 5) +
+  labs(title=NULL, x="Clusters (i.e. conservation)", y="Accessibility rate") + boxplot_theme()
+# Acc profile conservation - Acc rate association
+p2 <- ggplot(accrna[,c("factor_clusters", "var_acc", "N")], aes(x=factor_clusters, y=var_acc)) +
+  geom_boxplot(alpha=0.7, outlier.shape=NA, fill="#00BFC4") + 
+  stat_summary(fun.y = function(x){ xx <- 0; return(xx + 0.7)}, aes(label = paste0("N=", as.character(N))), geom='text', col='black', size = 5) +
+  labs(title=NULL, x="Clusters (i.e. conservation)", y="Acc rate variance") + boxplot_theme()
+# Combine them to create one plot
+pp <- cowplot::plot_grid(p1, p2, label_size = 30, labels="AUTO", ncol = 1, nrow = 2, rel_widths = c(1, 1))
+plot(pp)
+invisible(pdf(file = paste0(io$out_dir, "box_accProfCons_accRate.pdf"), width = 9, height = 9, useDingbats=FALSE)); pp; invisible(dev.off())
+rm(p1, p2, pp)
+```
+
+Below we show the relationship between mean accessibility rate and mean expression levels across cells, and as expected we have a positive association between these layers.
+```{r associate_3, echo=FALSE, warning=FALSE, message=FALSE}
+# Acc rate - Mean expression association
+p <- scatter_plot(accrna[, c("mean_expr", "mean_acc", "var_acc")], xlabel = "Mean expression", ylabel = "Accessibility rate", title = "", subtitle = paste0("Pearson's r = ", round(cor(accrna$mean_acc, accrna$mean_expr), 2)), lm = TRUE)
+p
+invisible(pdf(file = paste0(io$out_dir, "scatter_accRate_exprMean.pdf"), width = 9, height = 6, useDingbats=FALSE)); p; invisible(dev.off())
+rm(p)
+```
+
+## Association with expression variability
+To associate the relationship of accessibility conservation with expression variability, I will use to different metrics: variance and coefficient of variation (CV). The CV is often used to measure the variability of scRNA-Seq data, e.g. [Grun et. al. (2014)](http://www.nature.com/nmeth/journal/v11/n6/full/nmeth.2930.html?foxtrotcallback=true) and work from John as well.
+
+```{r mean_var_expr, eval=FALSE, echo=FALSE, warning=FALSE, message=FALSE, fig.width=9, fig.height=12}
+# Expression mean - variance relationship
+p1 <- scatter_plot(accrna[, c("mean_expr", "var_expr", "clusters")], xlabel = "Mean expression", ylabel = "Expr variance", title = "", lm = TRUE, loess = TRUE)
+# Expression mean - CV relationship
+p2 <- scatter_plot(accrna[, c("mean_expr", "cv_expr", "clusters")], xlabel = "Mean expression", ylabel = "Expr log2CV", title = "", lm = TRUE, loess = TRUE)
+# Expression mean - overdispersion relationship
+p3 <- scatter_plot(accrna[, c("mean_expr", "overdispersion", "clusters")], xlabel = "Mean expression", ylabel = "Expr overdisp", title = "", lm = TRUE, loess = TRUE)
+pp <- cowplot::plot_grid(p1, p2, p3, label_size = 30, labels="AUTO", ncol = 1, nrow = 3, rel_widths = c(1, 1))
+plot(pp)
+invisible(pdf(file = paste0(io$out_dir, "scatter_exprStats.pdf"), width = 9, height = 12, useDingbats=FALSE)); print(pp); invisible(dev.off())
+rm(p1, p2, p3, pp)
+```
+Let's see first the relationship of mean expression with variance, CV and overdispersion, respectively (i.e. look at the left column). For the mean-CV relationship we obtain the same plot as the paper above, where lowly expressed genes have higher coefficient of variation. On the other hand, for the mean-variance relationship we obtain a bell-shape curve, where moderately expressed genes have the highest variance, mostly due to dropouts. The next two columns show the relationship between Acc conservation and the different summary statistics for gene expression, which are shown in the leftmost column.
+```{r acc_var_expr, echo=FALSE, warning=FALSE, message=FALSE,fig.width=18, fig.height=14}
+# Expression mean - variance relationship
+p01 <- scatter_plot(accrna[, c("mean_expr", "var_expr", "clusters")], xlabel = "Mean expression", ylabel = "Expr variance", title = "", lm = TRUE, loess = TRUE)
+# Expression mean - CV relationship
+p02 <- scatter_plot(accrna[, c("mean_expr", "cv_expr", "clusters")], xlabel = "Mean expression", ylabel = "Expr log2CV", title = "", lm = TRUE, loess = TRUE)
+# Expression mean - overdispersion relationship
+p03 <- scatter_plot(accrna[, c("mean_expr", "overdispersion", "clusters")], xlabel = "Mean expression", ylabel = "Expr overdisp", title = "", lm = TRUE, loess = TRUE)
+# Acc conservation - Expression variance association
+p1 <- ggplot(accrna[,c("factor_clusters","var_expr", "N")], aes(x=factor_clusters, y=var_expr)) +
+  geom_boxplot(alpha=0.8, outlier.shape=NA, fill="#00BFC4") + geom_hline(yintercept=0, colour="black", linetype="dashed") +
+  stat_summary(fun.y = function(x){ xx <- min(x); return(xx - 0.7)}, aes(label = paste0("N=", as.character(N))), geom='text', col='black', size = 5) +
+  labs(title=NULL, x="Clusters (i.e. conservation)", y="Expression variance") + boxplot_theme()
+# Acc conservation - Expression CV association
+p2 <- ggplot(accrna[,c("factor_clusters","cv_expr", "N")], aes(x=factor_clusters, y=cv_expr)) +
+  geom_boxplot(alpha=0.8, outlier.shape=NA, fill="#00BFC4") + geom_hline(yintercept=0, colour="black", linetype="dashed") +
+  stat_summary(fun.y = function(x){ xx <- -4; return(xx - 0.7)}, aes(label = paste0("N=", as.character(N))), geom='text', col='black', size = 5) +
+  labs(title=NULL, x="Clusters (i.e. conservation)", y="Expression log2 CV") + boxplot_theme()
+# Acc conservation - Expression overdispersion association
+p3 <- ggplot(accrna[,c("factor_clusters","overdispersion", "N")], aes(x=factor_clusters, y=overdispersion)) +
+  geom_boxplot(alpha=0.8, outlier.shape=NA, fill="#00BFC4") + geom_hline(yintercept=0, colour="black", linetype="dashed") +
+  stat_summary(fun.y = function(x){ xx <- -2; return(xx - 0.7)}, aes(label = paste0("N=", as.character(N))), geom='text', col='black', size = 5) +
+  scale_y_continuous(limits = c(-3, 2)) +
+  labs(title=NULL, x="Clusters (i.e. conservation)", y="Expression overdisp") + boxplot_theme()
+
+# Acc rate conservation - Expression variance association
+p12 <- ggplot(accrna[,c("acc_var_levels","var_expr")], aes(x=acc_var_levels, y=var_expr)) +
+  geom_boxplot(alpha=0.8, outlier.shape=NA, fill="#00BFC4") + geom_hline(yintercept=0, colour="black", linetype="dashed") +
+  labs(title=NULL, x="Accessibility rate variance", y="Expression variance") + boxplot_theme()
+# Acc rate conservation - Expression CV association
+p22 <- ggplot(accrna[,c("acc_var_levels","cv_expr")], aes(x=acc_var_levels, y=cv_expr)) +
+  geom_boxplot(alpha=0.8, outlier.shape=NA, fill="#00BFC4") + geom_hline(yintercept=0, colour="black", linetype="dashed") +
+  labs(title=NULL, x="Accessibility rate variance", y="Expression log2 CV") + boxplot_theme()
+# Acc rate conservation - Expression overdispersion association
+p32 <- ggplot(accrna[,c("acc_var_levels","overdispersion")], aes(x=acc_var_levels, y=overdispersion)) +
+  geom_boxplot(alpha=0.8, outlier.shape=NA, fill="#00BFC4") + geom_hline(yintercept=0, colour="black", linetype="dashed") +
+  scale_y_continuous(limits = c(-3, 2)) +
+  labs(title=NULL, x="Accessibility rate variance", y="Expression overdisp") + boxplot_theme()
+
+pp <- cowplot::plot_grid(p01, p1, p12, p02, p2, p22, p03, p3, p32, label_size = 30, labels="AUTO", ncol = 3, nrow = 3, rel_widths = c(1, 1, 1))
+plot(pp)
+invisible(pdf(file = paste0(io$out_dir, "box_accCons_exprStats.pdf"), width = 18, height = 14, useDingbats=FALSE)); print(pp); invisible(dev.off())
+rm(p1, p2, p3, p01, p02, p03, p12, p22, p32, pp)
+```
+We observe (see 2nd column boxplots) that there is some association between conservation and CV, the lowest the conservation (i.e. more clusters) the highest the variability in terms of CV. (__Concerns: Is this actual association or is actually artefact coming from the mean-CV relationship of gene expression I showed before. That is, lowly expressed genes have higher CV, and since for examples genes with 4 or 5 clustes have almost 0 mean they will have high CV?__). The right boxplots show the relationship of accessibility rate variance with the different expression summary statistics, and in general we see no association.
+
+
+# GO analysis
+Here we perform Gene Ontology analysis to see whether specific clusters of genes are enriched for specific pathways.
+```{r go_enr_list, echo=FALSE, warning=FALSE, message=FALSE, fig.width=12, fig.height=6}
+io$reactomeFile  <- paste0(io$genelist_dir, "/mouse_v75_reactome.rds")
+io$reactomeFile2 <- paste0(io$genelist_dir, "/AllPathways.txt")
+
+# Read reactome file and change gene names to Upper case
+reactome           <- readRDS(io$reactomeFile); colnames(reactome) <- toupper(colnames(reactome))
+# Read pathways file to change from ID to description pathway
+tmp                <- read.table(io$reactomeFile2, header=F, quote="", sep="\t", stringsAsFactors=F)[,c(1,2)]
+reactome_meta      <- tmp[,2]; names(reactome_meta) <- tmp[,1]
+rownames(reactome) <- stringr::str_replace_all(rownames(reactome), reactome_meta)
+feature.sets       <- reactome  # Store results to the following object
+opts$min.size      <- 10  # Filter feature sets with small number of features
+feature.sets       <- feature.sets[rowSums(feature.sets)>=opts$min.size, ]
+# Remove features that do not intersect between the feature sets and the data
+accrna_tmp        <- copy(accrna)
+features          <- intersect(toupper(accrna_tmp$gene), colnames(feature.sets))
+foo_filt          <- accrna_tmp[,gene := toupper(gene)] %>% .[gene %in% features]
+feature.sets_filt <- feature.sets[,features]
+
+# Melt and merge data to do the fisher's test
+asd <- melt.data.table(as.data.table(feature.sets_filt, keep.rownames="pathway"), id.vars = "pathway", 
+                       variable.name="gene", value.name="value") %>% merge(foo_filt[,c("gene","clusters")], allow.cartesian=T, by="gene")
+# Get GO list for each cluster
+go_list <- list()
+for (c in unique(sort(asd$cluster))) {
+  go_list[[c]] <- asd[,.(p=fisher.test(x=matrix(data=c(.SD[clusters==c & value==1,.N], .SD[clusters!=c & value==1,.N],
+                                                       .SD[clusters==c & value==0,.N], .SD[clusters!=c & value==0,.N]), 
+                                                nrow=2, ncol=2), alternative="greater")[["p.value"]]), by="pathway"] %>% 
+    .[,padj:=p.adjust(p, method = "fdr")] %>% setorder(p)
+  # Create a nice formatted table
+  # print(knitr::kable(go_list[[c]][1:45], caption = paste0("GO enrichment: Cluster ", c)))
+  
+  # Convert pvalues to log scale (add a small regulariser to avoid numerical errors)
+  tmp <- copy(go_list[[c]])
+  tmp$log <- -log10(tmp$padj)
+  #order according to significance
+  tmp$pathway <- factor(tmp$pathway, levels = tmp$pathway[order(tmp$padj, decreasing = T)])
+  p <- ggplot(tmp[1:38], aes(x=pathway, y=log)) +
+    geom_point(size=5) +
+    geom_hline(yintercept=-log10(opts$threshold), linetype="longdash", color = "red") +
+    scale_color_manual(values=c("black","red")) +
+    geom_segment(aes(xend=pathway, yend=0)) +
+    ylab(expression(paste("-log"[10],"(",plain(q),"-value)"))) + coord_flip() +
+    theme(axis.text.y = element_text(size=rel(0.9), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(1.2), vjust=0.5, color='black'),
+      axis.title.y=element_blank(), legend.position='none',
+      panel.background = element_blank()
+    )
+  print(p)
+  invisible(pdf(file = paste0(io$out_dir, "GO_analysis/GO_enrichment_C", c, ".pdf"), width = 12, height = 10, useDingbats=FALSE)); print(p); invisible(dev.off())
+  fwrite(go_list[[c]], file = paste0(io$out_dir, "GO_analysis/GO_enrichment_C", c, ".csv"))
+}
+saveRDS(go_list, file = paste0(io$out_dir, "GO_analysis/GO_list.rds"))
+rm(reactome, reactome_meta, tmp, p, asd, features, foo_filt, feature.sets_filt, accrna_tmp, feature.sets, c)
+```
+
+## GO analysis using variance of accessibility rate
+Here we perform Gene Ontology analysis to see whether specific clusters of genes are enriched for specific pathways.
+```{r go_enr_list_rate, echo=FALSE, warning=FALSE, message=FALSE, fig.width=12, fig.height=6}
+io$reactomeFile  <- paste0(io$genelist_dir, "/mouse_v75_reactome.rds")
+io$reactomeFile2 <- paste0(io$genelist_dir, "/AllPathways.txt")
+
+# Read reactome file and change gene names to Upper case
+reactome           <- readRDS(io$reactomeFile); colnames(reactome) <- toupper(colnames(reactome))
+# Read pathways file to change from ID to description pathway
+tmp                <- read.table(io$reactomeFile2, header=F, quote="", sep="\t", stringsAsFactors=F)[,c(1,2)]
+reactome_meta      <- tmp[,2]; names(reactome_meta) <- tmp[,1]
+rownames(reactome) <- stringr::str_replace_all(rownames(reactome), reactome_meta)
+feature.sets       <- reactome  # Store results to the following object
+opts$min.size      <- 10  # Filter feature sets with small number of features
+feature.sets       <- feature.sets[rowSums(feature.sets)>=opts$min.size, ]
+# Remove features that do not intersect between the feature sets and the data
+accrna_tmp        <- copy(accrna)
+features          <- intersect(toupper(accrna_tmp$gene), colnames(feature.sets))
+foo_filt          <- accrna_tmp[,gene := toupper(gene)] %>% .[gene %in% features]
+feature.sets_filt <- feature.sets[,features]
+
+# Melt and merge data to do the fisher's test
+asd <- melt.data.table(as.data.table(feature.sets_filt, keep.rownames="pathway"), id.vars = "pathway", 
+                       variable.name="gene", value.name="value") %>% merge(foo_filt[,c("gene","acc_var_levels")], allow.cartesian=T, by="gene")
+# Get GO list for each cluster
+go_list <- list()
+for (c in unique(sort(asd$acc_var_levels))) {
+  go_list[[c]] <- asd[,.(p=fisher.test(x=matrix(data=c(.SD[acc_var_levels==c & value==1,.N], .SD[acc_var_levels!=c & value==1,.N],
+                                                       .SD[acc_var_levels==c & value==0,.N], .SD[acc_var_levels!=c & value==0,.N]), 
+                                                nrow=2, ncol=2), alternative="greater")[["p.value"]]), by="pathway"] %>% 
+    .[,padj:=p.adjust(p, method = "fdr")] %>% setorder(p)
+  # Create a nice formatted table
+  # print(knitr::kable(go_list[[c]][1:45], caption = paste0("GO enrichment: Cluster ", c)))
+  
+  # Convert pvalues to log scale (add a small regulariser to avoid numerical errors)
+  tmp <- copy(go_list[[c]])
+  tmp$log <- -log10(tmp$padj)
+  #order according to significance
+  tmp$pathway <- factor(tmp$pathway, levels = tmp$pathway[order(tmp$padj, decreasing = T)])
+  p <- ggplot(tmp[1:38], aes(x=pathway, y=log)) +
+    geom_point(size=5) +
+    geom_hline(yintercept=-log10(opts$threshold), linetype="longdash", color = "red") +
+    scale_color_manual(values=c("black","red")) +
+    geom_segment(aes(xend=pathway, yend=0)) +
+    ylab(expression(paste("-log"[10],"(",plain(q),"-value)"))) + coord_flip() +
+    theme(axis.text.y = element_text(size=rel(0.9), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(1.2), vjust=0.5, color='black'),
+      axis.title.y=element_blank(), legend.position='none',
+      panel.background = element_blank()
+    )
+  print(p)
+  invisible(pdf(file = paste0(io$out_dir, "GO_analysis/rate/GO_enrichment_C", c, ".pdf"), width = 12, height = 10, useDingbats=FALSE)); print(p); invisible(dev.off())
+  fwrite(go_list[[c]], file = paste0(io$out_dir, "GO_analysis/rate/GO_enrichment_C", c, ".csv"))
+}
+saveRDS(go_list, file = paste0(io$out_dir, "GO_analysis/rate/GO_list.rds"))
+#rm(reactome, reactome_meta, tmp, p, asd, features, foo_filt, feature.sets_filt, accrna_tmp, feature.sets, c)
+```
+
+
+# Histone marks
+Here we perform Histone mark enrichment analysis to see whether specific clusters of genes are enriched for specific marks.
+```{r hm_genelist, echo=FALSE, warning=FALSE, message=FALSE, results='asis',fig.width=12, fig.height=7}
+# Read histone marks files
+h3k4_genes <- fread(io$h3k4me3_genes_file) %>% as.data.table %>% .[, c("V1", "V2", "V3")] %>% setnames(c("chr", "start", "end")) %>% setkey(chr, start, end) %>% .[, chr := as.factor(sub("chr", "", chr))] %>% .[, id := paste0("hek4m3_", 1:.N)]
+h3k27_genes <- fread(io$h3k27me3_genes_file) %>% as.data.table %>% .[, c("V1", "V2", "V3")] %>% setnames(c("chr", "start", "end")) %>% setkey(chr, start, end) %>% .[, chr := as.factor(sub("chr", "", chr))] %>% .[, id := paste0("h3k27me3_", 1:.N)]
+# Get RNA metdata to do the overlapping with genes
+rna_metadata_tmp <- rna_metadata[, c("chr", "start", "end", "gene")] %>%
+  .[,c("start", "end") := list(start - opts$gene_window, start + opts$gene_window)] %>% setkey(chr, start, end)
+# Do the overlap
+ov_h3k4  <- foverlaps(h3k4_genes, rna_metadata_tmp, nomatch = 0) %>% .[,c("gene")] %>% unique
+ov_h3k27 <- foverlaps(h3k27_genes, rna_metadata_tmp, nomatch = 0) %>% .[,c("gene")] %>% unique
+ov_h3    <- Reduce(intersect, list(ov_h3k4$gene, ov_h3k27$gene)) %>% as.data.table %>% setnames(c("gene"))
+# Total number of clusters k
+cls      <- length(unique(accrna$clusters))
+h3k4_c = h3k27_c = biv_c = unmark_c <- vector(mode = "numeric", length = cls)
+for (i in 1:cls){  # Iterate over each cluster and extract number of genes related to each histone mark
+  h3k4_c[i]   <- NROW(accrna[gene %in% ov_h3k4$gene & !(gene %in% ov_h3k27$gene) & clusters == i])
+  h3k27_c[i]  <- NROW(accrna[gene %in% ov_h3k27$gene & !(gene %in% ov_h3k4$gene) & clusters == i])
+  biv_c[i]    <- NROW(accrna[gene %in% ov_h3$gene & clusters == i])
+  unmark_c[i] <- NROW(accrna[!(gene %in% ov_h3k27$gene | gene %in% ov_h3k4$gene) & clusters == i])
+}
+
+# Create object for plotting
+dt <- data.table(Cluster = rep(paste0("C", seq(1:cls)), 4), 
+                 Mark = c(rep("H3K4me3", cls), rep("H3K27me3", cls), rep("Bivalent", cls), rep("Unmarked", cls)), 
+                 Proportion = c(as.integer(h3k4_c), as.integer(h3k27_c), as.integer(biv_c), as.integer(unmark_c)))
+dt <- dt %>% .[, N := sum(Proportion), by = Cluster]
+
+p <- ggplot(dt, aes(fill=Mark, y=Proportion, x=Cluster)) + geom_bar(stat="identity", position="fill", alpha=1) + 
+  stat_summary(fun.y = function(x){ xx <- 0; return(xx - 0.05)}, aes(label = paste0("N=", as.character(N))), geom='text', col='black', size = 7) +
+  #scale_fill_manual(values = c("tomato", "yellow2", "chartreuse3", "cornflowerblue")) 
+  labs(x="Clusters", y="Relative Proportion", fill = "Histone mark") +
+  scale_fill_discrete(name="Histone mark") + 
+  scale_fill_brewer(palette = "Set3") + barplot_theme()
+p
+invisible(pdf(file = paste0(io$out_dir, "HM_analysis/bar_HM_enrichment.pdf"), width = 12, height = 7)); p; invisible(dev.off())
+rm(h3k4_genes, h3k27_genes, rna_metadata_tmp, p, i, unmark_c, h3k4_c, h3k27_c, biv_c, cls)
+```
+
+
+## Histone marks by mean expression levels discretized
+```{r hm_genelist_discr, echo=FALSE, warning=FALSE, message=FALSE, results='asis',fig.width=12, fig.height=6}
+# Total number of clusters k
+cls      <- length(unique(accrna$clusters))
+disc_lev <- levels(accrna$discr_expr_levels)
+h3k4_c = h3k27_c = biv_c = unmark_c <- vector(mode = "numeric", length = cls)
+dt_all <- data.table(Cluster = character(), 
+                 Mark = character(), 
+                 Proportion = numeric(),
+                 Mean_Level = factor())
+# m <- matrix(0, nrow = cls * length(disc_lev), ncol = 4)
+# kk <- 1
+for (i in 1:cls){  # Iterate over each cluster and extract number of genes related to each histone mark
+  for (l in disc_lev){
+    h3k4_c[i]   <- NROW(accrna[gene %in% ov_h3k4$gene & !(gene %in% ov_h3k27$gene) & clusters == i & discr_expr_levels == l])
+    h3k27_c[i]  <- NROW(accrna[gene %in% ov_h3k27$gene & !(gene %in% ov_h3k4$gene) & clusters == i & discr_expr_levels == l])
+    biv_c[i]    <- NROW(accrna[gene %in% ov_h3$gene & clusters == i & discr_expr_levels == l])
+    unmark_c[i] <- NROW(accrna[!(gene %in% ov_h3k27$gene | gene %in% ov_h3k4$gene) & clusters == i & discr_expr_levels == l])
+    
+    # print(c(h3k4_c[i], h3k27_c[i], biv_c[i], unmark_c[i]))
+    # m[kk, ] <- c(h3k4_c[i], h3k27_c[i], biv_c[i], unmark_c[i])
+    # kk <- kk + 1
+    # Create object for plotting
+    dt <- data.table(Cluster = paste0("C", i), 
+                   Mark = c("H3K4me3", "H3K27me3", "Bivalent", "Unmarked"), 
+                   Proportion = c(as.integer(h3k4_c[i]), as.integer(h3k27_c[i]), as.integer(biv_c[i]), as.integer(unmark_c[i])),
+                   Mean_Level = l)
+    dt_all <- rbind(dt_all, dt)
+  }
+}
+##colnames(m) <- c("H3K4", "H3K27", "Bivalent", "Unmarked")
+dt_all <- dt_all %>% .[, N := sum(Proportion), by = c("Cluster", "Mean_Level")]
+
+
+p <- ggplot(dt_all, aes(fill=Mark, y=Proportion, x=Cluster)) + geom_bar(stat="identity", position="fill", alpha=1) + 
+  facet_grid(. ~ Mean_Level) +
+  stat_summary(fun.y = function(x){ xx <- 0; return(xx - 0.05)}, aes(label = paste0("N=", as.character(N))), geom='text', col='black', size = 3.7) +
+  labs(x="Clusters", y="Relative Proportion", fill = "Histone mark") +
+  scale_fill_discrete(name="Histone mark") + 
+  scale_fill_brewer(palette = "Set3") + barplot_multi_theme() + theme(legend.position="none")
+p
+invisible(pdf(file = paste0(io$out_dir, "HM_analysis/bar_HM_enrichment_discrete.pdf"), width = 12, height = 6)); p; invisible(dev.off())
+```
+
+
+## Histone marks by mean expression levels quantile
+```{r hm_genelist_quant, echo=FALSE, warning=FALSE, message=FALSE, results='asis',fig.width=13, fig.height=5.5}
+# Total number of clusters k
+cls      <- length(unique(accrna$clusters))
+mean_lev <- length(unique(accrna$mean_expr_levels))
+h3k4_c = h3k27_c = biv_c = unmark_c <- vector(mode = "numeric", length = cls)
+dt_all <- data.table(Cluster = character(), 
+                 Mark = character(), 
+                 Proportion = numeric(),
+                 Mean_Level = factor())
+for (i in 1:cls){  # Iterate over each cluster and extract number of genes related to each histone mark
+  for (l in 1:mean_lev){
+    h3k4_c[i]   <- NROW(accrna[gene %in% ov_h3k4$gene & !(gene %in% ov_h3k27$gene) & clusters == i & mean_expr_levels == l])
+    h3k27_c[i]  <- NROW(accrna[gene %in% ov_h3k27$gene & !(gene %in% ov_h3k4$gene) & clusters == i & mean_expr_levels == l])
+    biv_c[i]    <- NROW(accrna[gene %in% ov_h3$gene & clusters == i & mean_expr_levels == l])
+    unmark_c[i] <- NROW(accrna[!(gene %in% ov_h3k27$gene | gene %in% ov_h3k4$gene) & clusters == i & mean_expr_levels == l])
+    
+    # print(c(h3k4_c[i], h3k27_c[i], biv_c[i], unmark_c[i]))
+    # Create object for plotting
+    dt <- data.table(Cluster = paste0("C", i), 
+                   Mark = c("H3K4me3", "H3K27me3", "Bivalent", "Unmarked"), 
+                   Proportion = c(as.integer(h3k4_c[i]), as.integer(h3k27_c[i]), as.integer(biv_c[i]), as.integer(unmark_c[i])),
+                   Mean_Level = paste0("Expr Q", l))
+    dt_all <- rbind(dt_all, dt)
+  }
+}
+dt_all <- dt_all %>% .[, N := sum(Proportion), by = c("Cluster", "Mean_Level")]
+
+p <- ggplot(dt_all, aes(fill=Mark, y=Proportion, x=Cluster)) + geom_bar(stat="identity", position="fill", alpha=1) + 
+  facet_grid(. ~ Mean_Level) +
+  stat_summary(fun.y = function(x){ xx <- 0; return(xx - 0.05)}, aes(label = paste0("N=", as.character(N))), geom='text', col='black', size = 3.3) +
+  labs(x="Clusters", y="Relative Proportion", fill = "Histone mark") +
+  scale_fill_discrete(name="Histone mark") + 
+  scale_fill_brewer(palette = "Set3") + barplot_multi_theme() + theme(legend.position="none")
+p
+invisible(pdf(file = paste0(io$out_dir, "HM_analysis/bar_HM_enrichment_quantile.pdf"), width = 13, height = 5.5)); p; invisible(dev.off())
+```
+
+# Pluripotency genes
+Here we want to observe how pluripotent genes map to each cluster, i.e. accessibility conservation.
+```{r plur_genelist, echo=FALSE, warning=FALSE, message=FALSE, results='asis'}
+# Read pluripotency genes file
+plur_genes <- fread(io$plur_genes_file) %>% as.data.table %>% setnames(c("id", "gene"))
+plur_genes <- merge(plur_genes, accrna, by = c("id", "gene"))
+print(plur_genes[, .N, by = factor_clusters])
+```
+
+# TODO list
+1. Again from the list of genes in each cluster could we get the proportion of genes with specific histone marks that they are they associated? Essentially try to get a similar figure as [Guo et. al (2017)](http://www.nature.com/cr/journal/vaop/ncurrent/full/cr201782a.html), see Figure 1.E and 1.F. In their analysis they also used the Coefficient of Variation (CV) to measure variability of expressed genes (Figure 1.E right)!

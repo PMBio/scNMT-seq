@@ -1,0 +1,429 @@
+---
+title: "NMT-Seq EB: Correlation between expression and accessibility"
+output: 
+  BiocStyle::html_document: 
+    fig_width: 12
+    fig_height: 8
+---
+
+```{r echo=FALSE, include=FALSE}
+suppressPackageStartupMessages(library(scater))
+suppressPackageStartupMessages(library(purrr))
+suppressPackageStartupMessages(library(weights))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(cowplot))
+suppressPackageStartupMessages(library(gridExtra))
+suppressPackageStartupMessages(library(grid))
+suppressPackageStartupMessages(library(data.table))
+```
+
+```{r echo=FALSE, include=FALSE}
+
+# Define ggplot2 theme for scatter plots
+scatter_theme <- function(){
+  p <- theme(
+      plot.title=element_text(size=20, face='bold', margin=margin(0,0,10,0), hjust=0.5),
+      axis.text=element_text(size=rel(1.5), color='black'),
+      axis.title=element_text(size=rel(1.5), color='black'),
+      axis.title.y = element_text(margin=margin(0,10,0,0)),
+      axis.title.x = element_text(margin=margin(10,0,0,0)),
+      legend.position="none",
+      panel.border=element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank()
+    )
+}
+
+# Define ggplot2 theme for boxplots
+boxplot_theme <- function() {
+  p <- theme(
+    plot.title = element_text(size=30, hjust=0.5, margin=margin(0,0,20,0)),
+    axis.title.y = element_text(colour="black", size=20, vjust=1.5),
+    axis.title.x = element_text(colour="black", size=20, vjust=1.5, margin=margin(15,0,0,0)),
+    axis.text.x = element_text(colour="black",size=rel(1.6)),
+    axis.text.y = element_text(colour="black",size=rel(1.6)),
+    axis.line = element_line(colour="black", size=rel(0.7)),
+    axis.ticks.x = element_line(colour="black", size=rel(0.8)),
+    axis.ticks.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid = element_blank(),
+    legend.position="top",
+    legend.direction = 'horizontal',
+    legend.text=element_text(size=17),
+    legend.title=element_blank(),
+    legend.background=element_blank(),
+    panel.border = element_blank()
+  )
+}
+
+gg_volcano_plot <- function(cor_samples, title = ""){
+  p <- ggplot(cor_samples, aes(x=r, y=-log10(p))) +
+    labs(title=title, x="Weighted Pearson correlation", y=expression(paste("-log"[10],"(",plain(p),")"))) +
+    #geom_hline(yintercept = -log10(opts$threshold_fdr), color="blue") +
+    geom_segment(aes(x=0, xend=0, y=0, yend=8.1), color="orange") +
+    geom_point(aes(color=sig), size=2) +
+    scale_color_manual(values=c("black","red")) +
+    scale_x_continuous(limits=c(-1,1)) +
+    scale_y_continuous(limits=c(0,8.5)) +
+    annotate("text", x=0, y=8.47, size=7, label=sprintf("(%d)", all)) +
+    annotate("text", x=-0.5, y=8.47, size=7, label=sprintf("%d (-)",length(negative_hits))) +
+    annotate("text", x=0.5, y=8.47, size=7, label=sprintf("%d (+)",length(positive_hits))) +
+    # geom_text(data=cor_samples[sig == TRUE], aes(x=r, y=log_padj_fdr, label=gene), vjust=-0.0, hjust=-0.3) +
+    ggrepel::geom_text_repel(data=cor_samples[sig == TRUE], aes(x=r, y=-log10(p), label=gene), size=6) +
+    scatter_theme()
+} 
+
+gg_qqplot = function(cor_res, perm_xs, ci=0.95, title = "Quantile-quantile plot of p-values"){
+    xs <- cor_res$p
+    cor_res <- cor_res[, expected := -log10(1:.N / .N)]
+    N  <- length(xs)
+    df <- data.frame(observed = -log10(sort(xs)),
+                     permuted = -log10(sort(perm_xs)),
+                     expected = -log10(1:N / N),
+                     cupper   = -log10(qbeta(ci,     1:N, N - 1:N + 1)),
+                     clower   = -log10(qbeta(1 - ci, 1:N, N - 1:N + 1)))
+    
+    log10Pe = expression(paste("Expected -log"[10], "(", plain(p), ")" ))
+    log10Po = expression(paste("Observed -log"[10], "(", plain(p), ")" ))
+    ggplot(df) +
+        geom_point(aes(expected, permuted), shape=3, size=1.5, color = "cornflowerblue") +
+        geom_abline(intercept=0, slope=1, alpha=0.5, color = "darkgrey") +
+        geom_line(aes(expected, cupper), linetype=2, color = "darkgrey") +
+        geom_line(aes(expected, clower), linetype=2, color = "darkgrey") +
+        #geom_point(aes(expected, observed), size=2) +
+        geom_point(data=cor_res, aes(expected, -log10(sort(p)), color = sig), size=2) +
+        scale_color_manual(values=c("black","red")) +
+        xlab(log10Pe) + ylab(log10Po) + labs(title=title) + 
+      scatter_theme()
+}
+
+```
+
+<!-- # Parse and filter data -->
+```{r echo=FALSE, include=FALSE}
+# Data
+io   <- list()
+# io$base_dir   <- "/home/cakapourani/Documents/Code/datasets/nmt-seq-data"
+io$base_dir   <- "/Users/ricard/data/NMT-seq_EB"
+# io$base_dir   <- "/Users/kapouranis/Documents/Andreas/Code/datasets/nmt-seq-data"
+io$in.sample_metadata <- paste0(io$base_dir,"/sample_sheet.csv")
+io$annos_dir  <- paste0(io$base_dir, "/features/filt")
+io$rna_file   <- paste0(io$base_dir, "/rna/parsed/sceset.rds")
+io$acc_file   <- paste0(io$base_dir, "/acc/parsed/acc_data.tsv.gz")
+io$outdir <- "/Users/ricard/NMT-seq/rebuttal/EB/correlations/out/accrna"
+
+# Filtering parameters
+opts <- list()
+opts$min.weight     <- 1      # minimum weight per feature
+opts$min.coverage   <- 0.25    # minimum coverage per feature across samples (acc)
+opts$min.cdr        <- 0.25    # minimum cellular detection rate per gene (expr)
+opts$fraction.genes <- 0.5    # fraction of genes (expr) to keep based on variance
+opts$fraction.sites <- 0.5    # fraction of sites (acc) to keep based on variance
+opts$min.n          <- 100    # minimum number of features per annotation
+opts$min.s          <- 10     # minimum number of samples to do the correlation
+opts$gene_window    <- 2e4    # window length for the overlap between genes and features
+opts$n_perms        <- 10000  # Number of random permutations
+opts$threshold_fdr  <- 0.10   # pvalue threshold for significance in FDR
+opts$method <- "pearson"      # correlation type
+opts$weight <- TRUE           # weighted correlation? 
+
+opts$cor_samples <- T
+opts$permutation <- F
+
+# gene-associated contexts
+# opts$annos <- c("prom_50_50")
+opts$annos <- c("prom_50_50", "active_enhancers", "super_enhancers", "primed_enhancers", "CTCF", "p300", "Nanog", "Oct4")
+
+opts$anno_names <- c(
+  "prom_50_50_cgi"="CGI promoters",
+  "prom_50_50_noncgi"="non-CGI promoters",
+  "prom_50_50$"="Promoters",
+  "active_enhancers"="Active enhancers",
+  "super_enhancers"="Super enhancers",
+  "primed_enhancers"="Primed enhancers",
+  "exons"="Exons",
+  "introns"="Introns"
+)
+
+# cells 
+opts$cells <- fread(io$in.sample_metadata, header=T) %>% .[pass_accQC==T & pass_rnaQC==T,sample]
+
+```
+
+<!-- Load sample metadata -->
+```{r}
+sample_metadata <- fread(io$in.sample_metadata, header=T) %>% .[sample%in%opts$cells]
+```
+
+<!-- # Load data -->
+```{r load_rna, echo=FALSE, include=FALSE}
+# Load expression as SCESet object
+sceset <- readRDS(file = io$rna_file)
+
+# Subset cells
+sceset <- sceset[,opts$cells]
+
+# Create data.table
+rna <- exprs(sceset) %>% t %>% as.data.table(keep.rownames = "sample") %>% melt(id.vars = "sample", value.name = "expr", variable.name = "gene")
+
+# Extract gene coordinates metadata to do the overlap
+rna_metadata <- fData(sceset) %>% tibble::rownames_to_column("gene") %>% as.data.table %>% .[,c("chr", "start", "end", "gene", "ens_id")]  %>% 
+  .[, chr := as.factor(sub("chr", "", chr))] %>% setnames("ens_id", "id")
+```
+
+
+```{r load_acc, echo=FALSE, include=FALSE}
+
+# Load accessibility data
+accrna_dt <- fread(sprintf("zcat < %s", io$acc_file)) %>% as.data.table %>% .[anno%in%opts$annos & sample%in%opts$cells] %>% .[,anno:=factor(anno, levels=opts$annos)]
+
+# Load annotation metadata
+anno_dt <- lapply(opts$annos, function(anno) fread(sprintf("%s/%s.bed", io$annos_dir, anno), 
+  colClasses = c("character", "integer", "integer", "character", "character", "character"))[, c(1, 2, 3, 4, 5, 6)]) %>%  
+  rbindlist %>% setnames(c("chr", "start", "end", "strand", "id", "anno")) %>% .[,c("anno", "chr") := list(as.factor(anno), as.factor(chr))]
+```
+
+<!-- # Associate the non-genic contexts with overlapping genes -->
+```{r associate, echo=FALSE, warning=FALSE}
+accrna_list <- list()
+# Iterate over each feature
+for (ann in unique(accrna_dt$anno)){
+  # Subset corresponding anno
+  acc_tmp <- accrna_dt[anno == ann, ]
+  
+  # Non gene-associated feature
+  if (all(grepl("ENSMUSG", unique(acc_tmp$id)) == FALSE)) {
+    # Extract coordiantes for methylation sites and for genes
+    feature_metadata_tmp <- anno_dt[anno == ann, c("chr", "start", "end", "id")] %>% setkey(chr, start, end)
+    rna_metadata_tmp <- rna_metadata[, c("chr", "start", "end", "gene")] %>%
+      .[,c("start", "end") := list(start - opts$gene_window, end + opts$gene_window)] %>% setkey(chr, start, end)
+    # Do the overlap
+    ov <- foverlaps(feature_metadata_tmp, rna_metadata_tmp, nomatch = 0) %>% .[,c("gene", "id")]
+    # Add expression levels
+    ov_rna <- merge(rna, ov, by = "gene", allow.cartesian = TRUE)
+    # Merge with methylation data
+    accrna_list[[ann]] <- merge(ov_rna, acc_tmp, by = c("sample", "id")) %>% 
+      .[,c("sample", "id", "gene", "anno", "expr", "rate", "weight")]
+  }
+  # Gene-associated feature
+  else if (all(grepl("ENSMUSG", unique(acc_tmp$id)) == TRUE)) {
+    acc_tmp <- merge(acc_tmp, rna_metadata[, c("id", "gene")], by = "id")
+    accrna_list[[ann]] <- merge(rna, acc_tmp, by = c("sample", "gene")) %>%
+      .[,c("sample", "id", "gene", "anno", "expr", "rate", "weight")]
+  }
+}
+accrna_dt <- rbindlist(accrna_list)
+rm(accrna_list, acc_tmp, feature_metadata_tmp, rna_metadata_tmp, ov, ov_rna)
+```
+
+<!-- # Parse and filter data -->
+```{r filter_all, echo=FALSE}
+# Remove features with low weight (all types of correlation)
+accrna_dt <- accrna_dt[weight >= opts$min.weight]
+```
+
+```{r filter_across_samples, echo=FALSE}
+
+if (opts$cor_samples) {
+  
+  # To correlate across samples
+  accrna_filt <- copy(accrna_dt)
+  
+  ## Remove genes/features with constant expression across samples
+  keep_var_genes <- accrna_filt %>% split(.$anno) %>% map(~ .[, .(var = var(expr)), by = "gene"] %>% .[var > 2, gene])
+  keep_var_sites <- accrna_filt %>% split(.$anno) %>% map(~ .[, .(var = wtd.var(rate, weight)), by = c("id")] %>% .[var > 2, id])
+  accrna_filt <- accrna_filt %>% split(.$anno) %>% map2(., names(.), function(x,y) x[gene %in% keep_var_genes[[y]] & id %in% keep_var_sites[[y]]]) %>% rbindlist
+  
+  ## Filter genes with low cellular detection rate and sites with low coverage across samples
+  nsamples <- length(unique(accrna_filt$sample))
+  keep_cov_genes <- accrna_filt %>% split(.$anno) %>% map(~ .[,.(cdr = sum(expr>0)/.N), by = "gene"] %>% .[cdr >= opts$min.cdr, gene])
+  keep_cov_sites <- accrna_filt %>% split(.$anno) %>% map(~ .[,.(cov = .N/nsamples), by = c("id")] %>% .[cov >= opts$min.coverage, id])
+  accrna_filt <- accrna_filt %>% split(.$anno) %>% map2(., names(.), function(x,y) x[gene %in% keep_cov_genes[[y]] & id %in% keep_cov_sites[[y]]]) %>% rbindlist
+  
+  ## Extract highly variable genes/sites across samples
+  keep_hv_genes <- accrna_filt %>% split(.$anno) %>% map(~ .[,.(var = var(expr)), by = "gene"] %>% setorder(-var)  %>% head(n = nrow(.) * opts$fraction.genes) %>% .$gene)
+  keep_hv_sites <- accrna_filt %>% split(.$anno) %>% map(~ .[,.(var = wtd.var(rate,weight)), by = c("id")] %>% setorder(-var)  %>% head(n = nrow(.) * opts$fraction.sites) %>% .$id)
+  accrna_filt <- accrna_filt %>% split(.$anno) %>% map2(.,names(.), function(x,y) x[gene %in% keep_hv_genes[[y]] & id %in% keep_hv_sites[[y]]]) %>% rbindlist
+  
+  ## Filter id-gene pairs with small number of samples (only required for the correlation across samples)
+  accrna_filt <- accrna_filt[,n:=.N, by=c("gene","id","anno")] %>% .[n >= opts$min.s] %>% .[,n:=NULL]
+  
+  ## Filter annotations with few sites
+  # keep_anno   <- accrna_filt[, .(N = length(unique(id))), by = "anno"] %>% .[N > opts$min.n, anno]
+  # accrna_filt <- accrna_filt[anno %in% keep_anno] %>% .[, anno := drop.levels(anno)]
+}
+
+# keep_anno   <- accrna_dt[, .(N = length(unique(id))), by = "anno"] %>% .[N > opts$min.n, anno]
+# accrna_dt   <- accrna_dt[anno %in% keep_anno] %>% .[, anno := drop.levels(anno)]
+```
+
+<!-- Compute correlations  -->
+```{r cor_rate, echo=FALSE, include=FALSE}
+# Weighted correlation
+if (opts$weight == TRUE){
+  if (opts$method != "pearson") { print("Weighted correlation only supported for pearson"); stop() }
+  # Correlate rate across samples
+  if (opts$cor_samples) {
+    cor_samples <- accrna_filt[, wtd.cor(rate, expr, weight)[, c("correlation", "t.value", "p.value")], by = c("id", "gene", "anno")]
+  }
+  # Correlate rate across genes
+  cor_genes <- accrna_dt[, wtd.cor(rate, expr, weight)[, c("correlation", "t.value", "p.value")], by = c("sample", "anno")]
+}else{
+  if (opts$cor_samples) {
+    # Correlate rate across samples
+    cor_samples <- accrna_filt[, .(V1 = unlist(cor.test(rate, expr, alternative = "two.sided", method = opts$method)[c("estimate", "statistic", "p.value")])), by = c("id", "gene", "anno")]
+  }
+  # Correlate rate across genes
+  cor_genes <- accrna_dt[, .(V1 = unlist(cor.test(rate, expr, alternative = "two.sided", method = opts$method)[c("estimate", "statistic", "p.value")])), by = c("sample", "anno")]
+}
+
+# Compute adjusted p-values across samples (both FDR and Bonferroni)
+if (opts$cor_samples) {
+  cor_samples <- cor_samples %>% .[, para := c("r", "t", "p")] %>% dcast(id + gene + anno ~ para, value.var = "V1") %>%
+        .[, c("padj_fdr", "padj_bonf") := list(p.adjust(p, method = "fdr"), p.adjust(p, method = "bonferroni")), by = "anno"] %>%
+        .[, c("log_padj_fdr","log_padj_bonf") := list(-log10(padj_fdr), -log10(padj_bonf))] %>%
+        .[, sig := padj_fdr <= opts$threshold_fdr] %>%  setorder(padj_fdr)
+}
+
+# Compute adjusted p-values across genes (both FDR and Bonferroni)
+cor_genes <- cor_genes %>% .[,para := c("r", "t", "p")] %>% dcast(sample + anno ~ para, value.var = "V1") %>% 
+      .[, c("padj_fdr", "padj_bonf") := list(p.adjust(p, method = "fdr"), p.adjust(p, method = "bonferroni")), by = anno] %>%
+      .[, c("log_padj_fdr", "log_padj_bonf") := list(-log10(padj_fdr), -log10(padj_bonf))] %>%
+      .[, sig := padj_fdr <= opts$threshold_fdr] %>% setorder(padj_fdr)
+```
+
+<!-- Run permutation test  -->
+```{r perm_cor_rate, echo=FALSE, include=FALSE}
+if (opts$cor_samples) { 
+  if (opts$permutation) {
+    pp_vals <- vector(mode = "numeric", length = length(cor_samples$p))
+    # For each iteration...
+    for (k in 1:opts$n_perms){
+      # Copy original methylation data
+      accrna_filt_perm <- copy(accrna_filt)
+      # Permute gene expression levels
+      accrna_filt_perm <- accrna_filt_perm[, expr := sample(expr), by = c("gene", "id", "anno")]
+      # Compute correlation across samples
+      # cor_samples_perm <- accrna_filt_perm[, .(p = wtd.cor(expr, rate, weight)[, c("p.value")]), by = c("id", "gene", "anno")]
+      cor_samples_perm <- accrna_filt_perm[, .(p = cor.test(rate, expr, method=opts$method)[["p.value"]]), by = c("id","gene","anno")]
+      # For each annotation sort by p-value
+      cor_samples_perm <- cor_samples_perm %>% split(.$anno) %>% map(~ .[,.(anno = anno, p = sort(p))]) %>% rbindlist
+      # Add the sorted p-values
+      pp_vals <- pp_vals + cor_samples_perm %>% .[, p]
+    }
+    # Compute the average p-values
+    pp_vals <- pp_vals / opts$n_perms
+    # Store them in a data.table for later analysis
+    cor_samples_perm <- cor_samples_perm[, p := pp_vals]
+  }
+}
+
+```
+
+
+<!-- Rename annotations for better plotting -->
+```{r rename, echo=FALSE, include=FALSE}
+if (opts$cor_samples) {
+  cor_samples[,anno:=stringr::str_replace_all(cor_samples$anno, opts$anno_names)]# %>%  .[,anno:=factor(anno, levels=opts$annos)]
+  if (opts$permutation)
+    cor_samples_perm[,anno:=stringr::str_replace_all(cor_samples_perm$anno, opts$anno_names)]
+}
+cor_genes[,anno:=stringr::str_replace_all(cor_genes$anno, opts$anno_names)]# %>%  .[,anno:=factor(anno, levels=opts$annos)]
+```
+
+
+<!-- Boxplot of correlations between methylation and expression -->
+```{r boxplot_expr, echo=FALSE, include=TRUE, warning=FALSE, message=FALSE}
+
+# Boxplot of correlations across samples
+if (opts$cor_samples) {
+  p <- ggplot(cor_samples, aes(x=anno, y=r)) +
+    geom_boxplot(alpha=0.8, outlier.shape=NA, fill="#00BFC4") + geom_hline(yintercept=0, colour="black", linetype="dashed") +
+    labs(title="Correlation across cells", x="", y="Weighted Pearson correlation coefficient") +
+    # scale_y_continuous(limits=c(-0.7,0.7)) +
+    coord_flip() + boxplot_theme()
+  print(p)
+  pdf(file=paste0(io$outdir, "/accrna_boxplot_acrosssamples.pdf"), width=8, height=6)
+  print(p)
+  dev.off()
+}
+
+# Boxplot of correlations across genes
+p <- ggplot(cor_genes, aes(x=anno, y=r)) +
+  geom_boxplot(alpha=0.8, outlier.shape=NA, fill="#00BFC4") +
+  geom_hline(yintercept=0, colour="black", linetype="dashed") +
+  labs(title="Correlation across genes", x="", y="Weighted Pearson correlation coefficient") +
+  # scale_y_continuous(limits=c(-0.41, 0.05)) +
+  coord_flip() + boxplot_theme()
+p
+pdf(file=paste0(io$outdir, "/accrna_boxplot_acrossgenes.pdf"), width=8, height=6)
+print(p)
+dev.off()
+
+
+# Boxplot of correlations across genes by lineage
+tmp <- merge(cor_genes, sample_metadata[,c("sample","lineage")], by="sample")
+p <- ggplot(tmp, aes(x=anno, y=r)) +
+  # geom_boxplot(alpha=0.8, outlier.shape=NA, fill="#F8766D") +
+  geom_boxplot(aes(fill=lineage), alpha=0.8, outlier.shape=NA) +
+  scale_fill_manual(values=c("dodgerblue1","dodgerblue4")) +
+  geom_hline(yintercept=0, colour="black", linetype="dashed") +
+  labs(title="Correlation across genes", x="", y="Weighted Pearson correlation coefficient") +
+  # scale_y_continuous(limits=c(-0.41, 0.05)) +
+  coord_flip() + boxplot_theme()
+print(p)
+
+pdf(file=paste0(io$outdir, "/accrna_boxplot_acrossgenes_lineage.pdf"), width=8, height=6)
+print(p)
+dev.off()
+```
+
+<!-- Volcano plot of p-values against Pearson's r and QQ-plot of p-values -->
+```{r, echo=FALSE}
+
+if (opts$cor_samples & opts$permutation) {
+  
+  pp <- qq <- list()
+  for (n in unique(cor_samples$anno)) {
+    
+    # Compute positive and negative hits in terms of correlation
+    negative_hits <- cor_samples[anno==n & sig==TRUE & r<0,id]
+    positive_hits <- cor_samples[anno==n & sig==TRUE & r>0,id]
+    all <- nrow(cor_samples[anno == n,])
+    
+    # Generate volcano plot  
+    pp[[n]] <- gg_volcano_plot(cor_samples[anno == n,], title = "")
+    
+    # Generate permutation plot
+    qq[[n]] <- gg_qqplot(cor_samples[anno == n, ], cor_samples_perm[anno == n]$p, title = "")
+    
+    # Combine and save
+    print(plot_grid(pp[[n]], qq[[n]], labels = c("", ""), label_size = 20, ncol = 2, nrow = 1))
+    pdf(file=paste0(io$outdir,"/volcano_", n, ".pdf"), width = 14, height = 8, useDingbats = FALSE)
+    grid.arrange(pp[[n]], qq[[n]], ncol=2, top = textGrob(n, gp=gpar(fontsize=29, fontface = "bold")), newpage = TRUE)
+    dev.off()
+    
+  }
+  
+}
+```
+
+<!-- Save results -->
+```{r}
+cols <- c("p","r","t","padj_fdr","padj_bonf","log_padj_fdr","log_padj_bonf")
+
+cor_genes[,(cols) := round(.SD,3), .SDcols=cols]
+fwrite(cor_genes, paste0(io$outdir,"/accrna_cor_features.tsv"), sep="\t")
+
+if (opts$cor_samples) {
+  cor_samples[,(cols) := round(.SD,3), .SDcols=cols]
+  fwrite(cor_samples, paste0(io$outdir,"/accrna_cor_samples.tsv"), sep="\t")
+  
+  if (opts$permutation) {
+    cor_samples_perm[,(cols) := round(.SD,3), .SDcols=cols]
+    fwrite(cor_samples_perm, paste0(io$outdir,"/accrna_cor_samples_perm.tsv"), sep="\t")
+  }
+}
+```
+

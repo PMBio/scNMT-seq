@@ -1,0 +1,107 @@
+---
+title: "NMT-Seq serum cells: Heatmaps of methylation"
+output: 
+  BiocStyle::html_document: 
+    fig_width: 15
+    fig_height: 8
+---
+  
+```{r load_modules, echo=FALSE, include=FALSE}
+library(data.table)
+library(purrr)
+library(ggplot2)
+library(gplots)
+library(RColorBrewer)
+library(scater)
+```
+
+```{r}
+matrix.please<-function(x) {
+    m<-as.matrix(x[,-1])
+    rownames(m)<-x[[1]]
+    m
+}
+```
+
+```{r define_opts, echo=TRUE, include=FALSE}
+
+## I/O ##
+io <- list()
+io$met_file  <- "/Users/ricard/data/NMT-seq/met/parsed/met_data.tsv.gz"
+io$sample.metadata  <- "/Users/ricard/data/NMT-seq/sample_info.txt"
+io$outdir  <- "/Users/ricard/NMT-seq/heatmap/out"
+
+## Options ##
+opts <- list()
+
+# Define filtering options
+opts$min.weight     <- 3      # Minimum weight per feature
+opts$min.coverage   <- 0.5    # minimum coverage per feature across samples (methylation)
+
+# Define which annotations to use
+opts$met_annos <- c("prom_2000_2000","genebody","active_enhancers","super_enhancers")
+# opts$met_annos <- c("prom_2000_2000")
+
+# Define which cells to use
+opts$cells <- fread(io$sample.metadata) %>% .[pass_metQC==T] %>% .$sample
+```
+
+```{r load_data, echo=FALSE, include=FALSE}
+
+# load sample metadata
+sample_metadata <- fread(io$sample.metadata) %>% .[sample%in%opts$cells]
+
+# Load methylation data
+met <- fread(sprintf("zcat < %s",io$met_file)) %>% .[anno %in% opts$met_annos & sample %in% opts$cells] 
+stopifnot(length(setdiff(unique(met$sample),opts$cells))==0)
+
+```
+
+
+```{r filter_data, echo=FALSE}
+
+# Remove features with low weight (all types of correlation)
+met <- met[weight >= opts$min.weight]
+
+## Filter sites with low coverage
+met <- met[, cov:=.N/length(opts$cells), by=c("id","anno")] %>% .[cov >= opts$min.coverage] %>% .[,cov:=NULL]
+
+# By variance
+opts$n <- 500
+keep_hv_sites <- met %>% split(.$anno) %>% map(~ .[,.(var = var(rate)), by="id"] %>% setorder(-var) %>% head(n=opts$n) %>% .$id)
+met <- met %>% split(.$anno) %>% map2(.,names(.), function(x,y) x[id %in% keep_hv_sites[[y]]]) %>% rbindlist
+
+
+setkey(met,anno)
+```
+
+<!-- Create matrix  -->
+```{r}
+dmatrix_list <- list()
+for (anno in opts$met_annos) {
+  dmatrix_list[[anno]] <- met[anno,c("id","rate","sample")] %>% 
+    dcast(sample~id, value.var="rate") %>% matrix.please
+}
+```
+
+<!-- Plot heatmap -->
+```{r}
+annotation_row <- sample_metadata[,c("sample","method")] %>% as.data.frame %>%
+  tibble::column_to_rownames("sample")
+
+for (anno in opts$met_annos) {
+  pdf(paste0(io$outdir,"/heatmap_met_",anno,".pdf"))
+  # png(paste0(io$outdir,"/heatmap_",anno,".png"))
+  
+  pheatmap::pheatmap(dmatrix_list[[anno]], main=anno,
+                     cluster_rows = T, cluster_cols = T, annotation_row = annotation_row, annotation_col = NA,
+                     show_colnames = F, show_rownames = F)
+  
+  # heatmap.2(dmatrix_list[[anno]], col=colorRampPalette(rev(brewer.pal(n = 7, name =
+  # "RdYlBu")))(100), na.color = "gray95", Rowv=T, Colv=T, density.info="none", trace="none",
+  # key=T, labRow = FALSE, labCol = FALSE)
+  
+  dev.off()
+}
+```
+
