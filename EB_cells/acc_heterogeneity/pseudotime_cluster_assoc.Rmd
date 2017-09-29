@@ -1,0 +1,251 @@
+---
+title: "NMT-Seq: Association between Acc cluster assignments and pseudotime"
+output: 
+  BiocStyle::html_document: 
+    fig_width: 12
+    fig_height: 8
+---
+
+```{r echo=FALSE, include=FALSE}
+# devtools::install_github("andreaskapou/BPRMeth-devel")
+suppressPackageStartupMessages(library(BPRMeth))
+suppressPackageStartupMessages(library(scater))
+suppressPackageStartupMessages(library(purrr))
+suppressPackageStartupMessages(library(weights))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(cowplot))
+suppressPackageStartupMessages(library(gridExtra))
+suppressPackageStartupMessages(library(scales))
+suppressPackageStartupMessages(library(grid))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(truncnorm))
+suppressPackageStartupMessages(library(MASS))
+```
+
+```{r echo=FALSE, include=FALSE}
+gg_volcano_plot <- function(cor_samples, title = ""){
+  p <- ggplot(cor_samples, aes(x=rho_spearman, y=-log10(p_spearman))) +
+    labs(title=title, x="Spearman's rank correlation coefficient", y=expression(paste("-log"[10],"(",plain(p),")"))) +
+    geom_segment(aes(x=0, xend=0, y=0, yend=4.17), color="orange") +
+    geom_point(aes(color=sig), size=2) +
+    scale_color_manual(values=c("black","red")) +
+    scale_x_continuous(limits=c(-.8, .8)) +
+    scale_y_continuous(limits=c(0,4.3)) +
+    annotate("text", x=0, y=4.29, size=7, label=sprintf("(%d)", all)) +
+    annotate("text", x=-0.5, y=4.29, size=7, label=sprintf("%d (-)",length(negative_hits))) +
+    annotate("text", x=0.5, y=4.29, size=7, label=sprintf("%d (+)",length(positive_hits))) +
+    ggrepel::geom_text_repel(data=cor_samples[1:5], aes(x=rho_spearman, y=-log10(p_spearman), label=gene), size=6) +
+    scatter_volc_theme()
+}
+
+ggplot_bpr_profiles <- function(X, obs, title="", subtitle="", up_label="-500bp", down_label="+500bp", middle_label="TSS", ...){
+  p <- ggplot(data = data.frame(X), aes(x = xs, y = ys)) +
+    geom_line(aes(x = xs, y = ys), size=1.5, col = "darkblue") +
+    geom_point(data = obs, mapping = aes(x = x, y = y), shape=1, color="red", size=3) +
+    geom_ribbon(data = data.frame(X), mapping = aes(ymin= ys_low, ymax= ys_high), alpha=0.25, size = 0.1, fill="cornflowerblue") +
+    scale_x_continuous(limits = c(-1, 1), labels =c(up_label, "", middle_label, "", down_label)) + 
+    scale_y_continuous(limits = c(0, 1), breaks=pretty_breaks(n=4)) + 
+    labs(title = title, subtitle = subtitle, x="genomic region", y="Accessibility") + 
+    line_theme()
+}
+
+# Define ggplot2 theme for scatter plots
+scatter_volc_theme <- function(){
+  p <- theme(
+      plot.title=element_text(size=20, face='bold', margin=margin(0,0,10,0), hjust=0.5),
+      axis.text=element_text(size=rel(1.5), color='black'),
+      axis.title=element_text(size=rel(1.5), color='black'),
+      axis.title.y = element_text(margin=margin(0,10,0,0)),
+      axis.title.x = element_text(margin=margin(10,0,0,0)),
+      legend.position="none",
+      panel.border=element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank()
+    )
+}
+
+# Define ggplot2 theme for line plots
+line_theme <- function(){
+  p <- theme(
+      plot.title=element_text(size=25, face='bold', margin=margin(0,0,5,0), hjust=0.5),
+      axis.text=element_text(size=rel(1.15), color='black'),
+      axis.title=element_text(size=rel(1.55), color='black'),
+      axis.title.y = element_text(margin=margin(0,15,0,0)),
+      axis.title.x = element_text(margin=margin(15,0,0,0)),
+      axis.ticks.x = element_line(colour="black", size=rel(0.8)),
+      axis.ticks.y = element_blank(),
+      legend.position="right",
+      legend.key.size = unit(1.9, 'lines'),
+      legend.title=element_text(size=24, face='bold'),
+      legend.text=element_text(size=19),
+      panel.border=element_blank(),
+      panel.grid.major = element_line(colour = "gainsboro"),
+      #panel.grid.minor = element_line(colour = "grey"),
+      panel.background = element_blank()
+    )
+}
+```
+
+<!-- # Parse and filter data -->
+```{r echo=FALSE, include=FALSE}
+# Data
+io                     <- list()
+io$base_dir            <- "/home/cakapourani/Documents/Code/datasets/nmt-seq-data-eb"
+io$out_dir             <- "/home/cakapourani/Documents/Code/nmt-seq/rebuttal/EB/lineage_profiles/out/"
+io$rna_file            <- paste0(io$base_dir, "/rna/parsed/sceset.rds")
+io$acc_file            <- paste0(io$base_dir, "/acc/parsed/profiles/cons_cluster_prom_200_200_basis13_GpCcov10_bic2_cellcov0.6.rds")
+io$genelist_dir        <- paste0(io$base_dir, "/metadata")
+io$pseudotime          <- "/home/cakapourani/Documents/Code/nmt-seq/rebuttal/EB/pseudotime/out/destiny.tsv"
+
+opts                   <- list()
+opts$annos             <- c("prom_200_200")
+opts$min.s             <- 20      # minimum number of samples to do the correlation
+opts$threshold_p       <- 0.01    # p-value threshold
+```
+
+<!-- # Load scRNA data -->
+```{r load_rna, echo=FALSE, include=FALSE, warning=FALSE, message=FALSE}
+# Load expression as SCESet object
+sceset        <- readRDS(file = io$rna_file)
+# Create data.table
+rna_dt        <- exprs(sceset) %>% t %>% as.data.table(keep.rownames = "sample") %>% melt(id.vars = "sample", value.name = "expr", variable.name = "gene")
+# Compute summary statistics for each gene across cells
+rna_all_stats <- rna_dt[, .(mean_expr = mean(expr), median_expr = median(expr), var_expr = var(expr), sd_expr = sd(expr)), by = gene]
+# Extract gene coordinates metadata to do the overlap
+rna_metadata  <- fData(sceset) %>% tibble::rownames_to_column("gene") %>% as.data.table %>% .[,c("chr", "start", "end", "gene", "ens_id")]  %>% .[, chr := as.factor(sub("chr", "", chr))] %>% setnames("ens_id", "id")
+# Merge rna data with metadata
+rna_all_stats <- merge(rna_metadata[, c("chr", "id", "gene")], rna_all_stats, by = c("gene")) # Merge using all samples
+rna_dt        <- merge(rna_metadata[, c("chr", "id", "gene")], rna_dt, by = c("gene"))        # Merge using only samples that pass filtering
+# Keep only expressed genes
+rna_all_stats <- rna_all_stats %>% .[mean_expr > 1]
+rm(sceset, N_cells)
+```
+
+<!-- # Load acc profile data -->
+```{r load_acc_prof, echo=FALSE, include=FALSE, warning=FALSE, message=FALSE}
+# Load accessibility data
+acc_profile  <- readRDS(io$acc_file) %>% .[cells > opts$min.s]
+# Make clusters column as factor and keep accessibility groups with more than 30 genes in each cluster
+acc_profile <- acc_profile %>% .[, factor_clusters := factor(clusters)] %>% .[, N := .N, by = clusters] %>% .[N > 30]
+# Merge with expression data using all samples 
+accrna <- merge(rna_all_stats, acc_profile, by = c("id")) %>% setorder(clusters) 
+rm(acc_profile, rna_all_stats)
+```
+
+<!-- # Load pseudotime data -->
+```{r load_pseudotime, echo=FALSE, include=FALSE, warning=FALSE, message=FALSE}
+pseudotime <- fread(io$pseudotime , header=T ) %>% setorder(pseudotime)
+```
+
+<!-- # Perform association with pseudotime -->
+```{r assoc, echo=FALSE, include=TRUE, warning=FALSE, message=FALSE}
+# Keep genes with more than one cluster
+accrna <- accrna[clusters > 1]
+p_spearman = rho_spearman <- vector(mode = "numeric", length = NROW(accrna))
+# Get lineage agreement using Spearman rank test
+for (i in 1:NROW(accrna)){
+  # Get lineage assigment of each cell for specific gene
+  cell_pseudotime <- pseudotime[sample %in% accrna$cell_names[[i]]]
+  # Obtain the total number of cells
+  N <- NROW(cell_pseudotime)
+  # Get cluster assignments
+  cell_clusters <- data.table(sample = accrna$cell_names[[i]], labels = accrna$cell_clusters[[i]]) %>% setkey(sample)
+  cell_clusters <- cell_clusters[cell_pseudotime$sample]
+  K <- length(unique(cell_clusters$labels))   # Number of clusters
+  cl_obj <- copy(cell_clusters)               # Copy data.table
+  for (k in 1:K){                             # Iterate over each cluster k
+    lab1 <- cl_obj$labels[1]                  # Get cluster lable of 1st instance
+    ind_k <- which(cl_obj$labels == k)        # Get indices of cluster labels with cluster k
+    if (lab1 == k){                           # If first element matches cluster k, don't do relabelling
+      cl_obj <- cl_obj[-ind_k]
+    }else{
+      ind_lab1 <- which(cl_obj$labels == lab1) # Which labels match label of 1st instance
+      cl_obj$labels[ind_lab1] <- k             # Update them with the cluster label k
+      cl_obj$labels[ind_k] <- lab1             # The prevous labels with cluster k, relabel to the label of 1st instance
+      cl_obj <- cl_obj[-ind_lab1]              # Remove labels of 1st instance
+      
+      act_ind_k <- which(cell_clusters$labels == k)   # Do relabelling of all data
+      act_lab1 <- which(cell_clusters$labels == lab1)
+      cell_clusters$labels[act_lab1] <- k             # Update them with the cluster label k
+      # The prevous labels with cluster k, relabel to the label of 1st instance
+      cell_clusters$labels[act_ind_k] <- lab1
+    }
+  }
+  accrna$cell_names[[i]]    <- cell_clusters$sample
+  accrna$cell_clusters[[i]] <- cell_clusters$labels
+  p_spearman[i]   <- c(cor.test(cell_pseudotime$pseudotime, cell_clusters$labels, method = "spearman", exact = FALSE)$p.value)
+  rho_spearman[i] <- cor(cell_pseudotime$pseudotime, cell_clusters$labels, method = "spearman")
+}
+# Concatenate results to data.table
+accrna <- accrna %>% .[, c("p_spearman", "rho_spearman") := list(p_spearman, rho_spearman)] %>% .[, sig := p_spearman <= opts$threshold_p] %>% setorder(p_spearman)
+print(accrna[1:10, c("gene", "p_spearman", "rho_spearman", "sig")])
+# Remove objects
+rm(lab1, ind_k, ind_lab1, cl_obj, act_ind_k, act_lab1, p_spearman, rho_spearman, cell_pseudotime, cell_clusters, K, i, k, N)
+```
+
+
+<!-- Volcano plot of p-values against Pearson's r and QQ-plot of p-values -->
+```{r plot_volcano, echo=FALSE, include=TRUE, warning=FALSE, message=FALSE}
+# Compute positive and negative hits in terms of correlation
+negative_hits <- accrna[sig==TRUE & rho_spearman < 0, id]
+positive_hits <- accrna[sig==TRUE & rho_spearman > 0, id]
+all <- nrow(accrna)
+# Create volcano plot
+p <- gg_volcano_plot(accrna, title = "")
+print(p)
+rm(all, negative_hits, positive_hits)
+```
+
+
+```{r plot_profiles, eval=TRUE, echo=FALSE, include=TRUE, warning=FALSE, message=FALSE}
+load(paste0(io$base_dir,"/acc/parsed/profiles/acc_400bp.RData"))
+
+opts$top_N <- 3
+for (hits in 1:opts$top_N){
+  gene_id <- accrna$id[hits]                      # Get gene ENS id
+  gene_dt <- lapply(region_dt, "[[", gene_id)     # Extract accessibility data
+  cl_names <- accrna$cell_names[[hits]]           # Names of cells passed filtering
+  cl_assign <- accrna$cell_clusters[[hits]]       # Cluster assignment of cells
+  cl_profiles <- accrna$cell_profiles[[hits]]     # Learned profiles for each cluster
+  K <- NCOL(cl_profiles)                          # Number of clusters K
+  xs <- seq(-1, 1, length = 100)
+  ys <- matrix(0, ncol = K, nrow = length(xs))
+  labs <- vector("character", length = K)
+  opts$basis_prof <- create_rbf_object(M = NROW(cl_profiles) - 1)
+  for (k in 1:K){   # Iterate over each cluster
+    ys[,k] <- eval_probit_function(opts$basis_prof, xs, cl_profiles[, k]) # Evaluate function for plotting
+    nnn <- cl_names[which(cl_assign == k)]                                # Get names of cells belonging to each cluster
+    labs[k] <- paste0("C", k, " ", round(median(rna_dt[id == gene_id & sample %in% nnn]$expr), 2))
+  }
+  # Create a data.table object
+  dt <- data.table(ys) %>% setnames(labs) %>% melt(variable.name = "Cluster", value.name = "ys") %>% .[, xs := xs]
+  # Create plot of cluesters
+  p_cl_prof <- ggplot(dt, aes(x = xs, y = ys, color=Cluster)) + geom_line(size=2) +
+      scale_x_continuous(limits = c(-1, 1), labels =c("-200bp", "", "TSS", "", "+200bp")) + 
+      scale_y_continuous(limits = c(0, 1), breaks=pretty_breaks(n=4)) + 
+      scale_color_brewer(palette="Dark2") + scale_fill_brewer(palette="Dark2") +
+      labs(title = paste0("Gene ", accrna$gene[hits]), x="genomic region", y="Accessibility") + line_theme()
+  
+  gene_dt_filt <- gene_dt[cl_names]
+  prof_cells <- bpr_bayes(x = gene_dt_filt, basis = opts$basis_prof, gibbs_nsim = 3000, 
+                            gibbs_burn_in = 1000, is_parallel = FALSE, keep_gibbs_draws = TRUE)
+  cells_names <- names(gene_dt_filt)
+  H <- design_matrix(x = opts$basis_prof, obs = xs)$H  # Create design matrix
+  ys_draws <- matrix(0, nrow = NROW(prof_cells$W_draws[[1]]), ncol = length(xs))
+  dt <- data.table(xs = xs, ys = 0, ys_low = 0, ys_high = 0)
+  pp <- list()
+  for (m in 1:length(cl_names)){
+    w_draws <- prof_cells$W_draws[[m]] # Compute predictive distribution
+    for (i in 1:NROW(prof_cells$W_draws[[1]])){ ys_draws[i, ] <- pnorm(H %*% w_draws[i, ]) }
+    # Compute quantiles of ys
+    ys_q <- apply(ys_draws, 2, quantile, probs = c(0.1, 0.9),  na.rm = TRUE)
+    dt <- dt %>% .[, c("ys", "ys_low", "ys_high") := list(colMeans(ys_draws), ys_q[1, ], ys_q[2, ])]
+    obs <- as.data.table(gene_dt_filt[[m]]) %>% setnames(c("x", "y"))
+    pp[[m]] <- ggplot_bpr_profiles(X = dt, obs = obs, title = paste0("Cell ", cells_names[m]), subtitle = paste0("Expr = ", round(rna_dt[id == gene_id & sample == cells_names[m], expr], 3)),  up_label = "-200bp", down_label = "+200bp", middle_label = "TSS")
+    print(pp[[m]])
+  }
+  print(p_cl_prof)
+}
+rm(k, m, xs, ys, ys_q, K, gene_dt_filt, cells_names, H, ys_draws, dt, obs, cl_assign, cl_names, hits, labs, gene_id, w_draws, cl_profiles, nnn, i)
+```

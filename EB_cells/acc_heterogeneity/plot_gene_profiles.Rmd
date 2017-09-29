@@ -1,0 +1,149 @@
+---
+title: "NMT-Seq: Example genes with clustered profiles"
+output: 
+  BiocStyle::html_document: 
+    fig_width: 12
+    fig_height: 8
+---
+
+```{r echo=FALSE, include=FALSE}
+# devtools::install_github("andreaskapou/BPRMeth-devel")
+suppressPackageStartupMessages(library(BPRMeth))
+suppressPackageStartupMessages(library(scater))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(stringi))
+suppressPackageStartupMessages(library(RColorBrewer))
+suppressPackageStartupMessages(library(scales))
+suppressPackageStartupMessages(library(purrr))
+suppressPackageStartupMessages(library(gridExtra))
+suppressPackageStartupMessages(library(cowplot))
+```
+
+```{r echo=FALSE, include=FALSE}
+ggplot_bpr_profiles <- function(X, obs, title="", subtitle="", up_label="-500bp", down_label="+500bp", middle_label="TSS", ...){
+  p <- ggplot(data = data.frame(X), aes(x = xs, y = ys)) +
+    geom_line(aes(x = xs, y = ys), size=1.5, col = "darkblue") +
+    geom_point(data = obs, mapping = aes(x = x, y = y), shape=1, color="red", size=3) +
+    geom_ribbon(data = data.frame(X), mapping = aes(ymin= ys_low, ymax= ys_high), alpha=0.4, size = 0.1, fill="cornflowerblue") +
+    scale_x_continuous(limits = c(-1, 1), labels =c(up_label, "", middle_label, "", down_label)) + 
+    scale_y_continuous(limits = c(0, 1), breaks=pretty_breaks(n=4)) + 
+    labs(title = title, subtitle = subtitle, x="genomic region", y="Accessibility") + 
+    line_theme()# + theme(axis.text.x = element_blank())
+}
+
+# Define ggplot2 theme for line plots
+line_theme <- function(){
+  p <- theme(
+      plot.title=element_text(size=20, face='bold', margin=margin(0,0,3,0), hjust=0.5),
+      #plot.subtitle=element_text(size=15, margin=margin(0,0,4,0), hjust=0.5),
+      axis.text=element_text(size=rel(1.05), color='black'),
+      axis.title=element_text(size=rel(1.45), color='black'),
+      axis.title.y = element_text(margin=margin(0,10,0,0)),
+      axis.title.x = element_text(margin=margin(10,0,0,0)),
+      axis.ticks.x = element_line(colour="black", size=rel(0.8)),
+      axis.ticks.y = element_blank(),
+      legend.position="right",
+      legend.key.size = unit(1.9, 'lines'),
+      legend.title=element_text(size=24, face='bold'),
+      legend.text=element_text(size=19),
+      panel.border=element_blank(),
+      panel.grid.major = element_line(colour = "gainsboro"),
+      #panel.grid.minor = element_line(colour = "grey"),
+      panel.background = element_blank()
+    )
+}
+```
+
+<!-- # Parse and filter data -->
+```{r echo=FALSE, include=FALSE}
+# Data
+set.seed(12345)
+io                     <- list()
+io$base_dir            <- "scNMT_data_EB_dir"
+load(paste0(io$base_dir,"/acc/parsed/profiles/acc_400bp.RData"))
+io$rna_file            <- paste0(io$base_dir, "/rna/parsed/sceset.rds")
+io$acc_file            <- paste0(io$base_dir, "/acc/parsed/profiles/cons_cluster_prom_200_200_basis13_GpCcov10_bic2_cellcov0.6.rds")
+opts                   <- list(basis_prof = create_rbf_object(M = 13))
+```
+
+<!-- # Load scRNA data -->
+```{r load_rna, echo=FALSE, include=FALSE, warning=FALSE, message=FALSE}
+# Load expression as SCESet object
+sceset        <- readRDS(file = io$rna_file)
+# Create data.table
+rna_dt        <- exprs(sceset) %>% t %>% as.data.table(keep.rownames = "sample") %>% melt(id.vars = "sample", value.name = "expr", variable.name = "gene")
+# Compute summary statistics for each gene across cells
+rna_all_stats <- rna_dt[, .(mean_expr = mean(expr), median_expr = median(expr), var_expr = var(expr), sd_expr = sd(expr)), by = gene]
+# Extract gene coordinates metadata to do the overlap
+rna_metadata  <- fData(sceset) %>% tibble::rownames_to_column("gene") %>% as.data.table %>% .[,c("chr", "start", "end", "gene", "ens_id")]  %>% .[, chr := as.factor(sub("chr", "", chr))] %>% setnames("ens_id", "id")
+# Merge rna data with metadata
+rna_all_stats <- merge(rna_metadata[, c("chr", "id", "gene")], rna_all_stats, by = c("gene")) # Merge using all samples
+rm(sceset, N_cells, rna_dt)
+```
+
+<!-- # Load sc-NOMe-seq data -->
+```{r load_acc, echo=FALSE, include=FALSE, warning=FALSE, message=FALSE}
+acc_profile  <- readRDS(io$acc_file) %>% .[cells > 5] # Load accessibility data
+acc_profile  <- acc_profile %>% .[, factor_clusters := factor(clusters)] %>% .[, N := .N, by = clusters] %>% .[N > 30]
+# Merge with expression data
+accrna_prof <- merge(rna_all_stats, acc_profile, by = c("id")) %>% setorder(clusters) 
+rm(acc_profile, rna_all_stats)
+```
+
+# Specific gene examples
+```{r plur_genelist, echo=FALSE, warning=FALSE, message=FALSE, fig.width=10, fig.height=8}
+gene_examples <- c("ENSMUSG00000037552", "ENSMUSG00000028786")
+for (gene_id in gene_examples){
+  gene_ind <- which(accrna_prof$id == gene_id)         # Get gene ENS id
+  gene_dt <- lapply(region_dt, "[[", gene_id)          # Extract accessibility data
+  cl_names <- accrna_prof$cell_names[[gene_ind]]       # Names of cells passed filtering
+  cl_assign <- accrna_prof$cell_clusters[[gene_ind]]   # Cluster assignment of cells
+  cl_profiles <- accrna_prof$cell_profiles[[gene_ind]] # Learned profiles for each cluster
+  K <- NCOL(cl_profiles)                               # Number of clusters K
+  xs <- seq(-1, 1, length = 100)
+  ys <- matrix(0, ncol = K, nrow = length(xs))
+  labs <- vector("character", length = K)
+  for (k in 1:K){   # Iterate over each cluster
+    ys[,k] <- eval_probit_function(opts$basis_prof, xs, cl_profiles[, k]) # Evaluate function for plotting
+    labs[k] <- paste0("C", k)
+  }
+  # Create a data.table object
+  dt <- data.table(ys) %>% setnames(labs) %>% melt(variable.name = "Cluster", value.name = "ys") %>% .[, xs := xs]
+  # Create plot of cluesters
+  p_cl_prof <- ggplot(dt, aes(x = xs, y = ys, color=Cluster)) + geom_line(size=2) +
+      scale_x_continuous(limits = c(-1, 1), labels =c("-200bp", "", "TSS", "", "+200bp")) + 
+      scale_y_continuous(limits = c(0, 1), breaks=pretty_breaks(n=4)) + 
+      scale_color_brewer(palette="Dark2") + scale_fill_brewer(palette="Dark2") +
+      labs(title = paste0("Gene ", accrna_prof$gene[gene_ind]), x="genomic region", y="Accessibility") + line_theme()
+  
+  cluster_plots <- list()
+  for (k in 1:K){
+    gene_dt_filt <- gene_dt[cl_names[which(cl_assign == k)]]
+    cells_names <- names(gene_dt_filt)
+    cl_pop <- length(cells_names)    # Number of cells in cluster k
+    # Learn profiles for each cell
+    prof_cells <- bpr_bayes(x = gene_dt_filt, basis = opts$basis_prof, gibbs_nsim = 3000, 
+                            gibbs_burn_in = 1000, is_parallel = FALSE, keep_gibbs_draws = TRUE)
+    H <- design_matrix(x = opts$basis_prof, obs = xs)$H  # Create design matrix
+    ys_draws <- matrix(0, nrow = NROW(prof_cells$W_draws[[1]]), ncol = length(xs))
+    dt <- data.table(xs = xs, ys = 0, ys_low = 0, ys_high = 0)
+    pp <- list()
+    for (m in 1:4){ # Plot only first 4 cells
+      w_draws <- prof_cells$W_draws[[m]]   # Compute predictive distribution
+      for (i in 1:NROW(prof_cells$W_draws[[1]])){ ys_draws[i, ] <- pnorm(H %*% w_draws[i, ]) }
+      # Compute quantiles of ys
+      ys_q <- apply(ys_draws, 2, quantile, probs = c(0.1, 0.9),  na.rm = TRUE)
+      dt <- dt %>% .[, c("ys", "ys_low", "ys_high") := list(colMeans(ys_draws), ys_q[1, ], ys_q[2, ])]
+      obs <- as.data.table(gene_dt_filt[[m]]) %>% setnames(c("x", "y"))
+      pp[[m]] <- ggplot_bpr_profiles(X = dt, obs = obs, title = paste0("Cell ", cells_names[m]),  
+                                     up_label = "-200bp", down_label = "+200bp", middle_label = "TSS")
+    }
+    cluster_plots[[k]] <- cowplot::plot_grid(plotlist = pp, label_size = 30, ncol = 2, nrow = 2, rel_widths = c(1, 1.2))
+    print(cluster_plots[[k]])
+  }
+  print(p_cl_prof)
+}
+rm(k, m, xs, ys, ys_q, K, gene_dt_filt, cl_pop, cells_names, H, ys_draws, dt, pp, obs, cl_assign, cl_names, i, labs, gene_ind, gene_id, w_draws, cl_profiles)
+```
+
