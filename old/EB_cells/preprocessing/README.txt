@@ -1,1 +1,0 @@
-Preprocessing of methylation and accessibility is done with the same as scripts as in serum_cells/preprocessing/metacc
