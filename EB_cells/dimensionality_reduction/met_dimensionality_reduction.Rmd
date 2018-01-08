@@ -1,0 +1,162 @@
+---
+title: "NMT-Seq: dimensionality reduction of methylation"
+output: 
+  BiocStyle::html_document: 
+    fig_width: 15
+    fig_height: 8
+---
+  
+```{r load_modules, echo=FALSE, include=FALSE}
+library(data.table)
+library(purrr)
+library(ggplot2)
+```
+
+```{r}
+matrix.please<-function(x) {
+    m<-as.matrix(x[,-1])
+    rownames(m)<-x[[1]]
+    m
+}
+```
+
+```{r define_opts, echo=TRUE, include=FALSE}
+
+# Data files
+io <- list()
+io$data  <- "/Users/ricard/data/NMT-seq/met/parsed/met_data.tsv.gz"
+io$sample.metadata  <- "/Users/ricard/data/NMT-seq/sample_info_all.txt"
+# io$sample.stats  <- "/Users/ricard/NMT-seq/stats/samples/sample_stats.txt"
+io$sample.stats  <- "/Users/ricard/NMT-seq/rebuttal/2i_vs_serum/stats/sample_stats.txt"
+
+opts <- list()
+opts$min.weight     <- 3      # Minimum weight per feature
+opts$min.coverage   <- 0.5    # minimum coverage per feature across samples (methylation)
+
+opts$annos <- c("prom_2000_2000","genebody","active_enhancers","super_enhancers","primed_enhancers")
+
+# Define which cells to use: only combined
+sample_metadata <- fread(io$sample.metadata) %>% .[pass_metQC==T] %>%
+  merge(fread(io$sample.stats) %>% .[context=="CG",c("sample","mean")], by="sample")
+opts$cells <- sample_metadata$sample
+```
+
+```{r load_data, echo=FALSE, include=FALSE}
+met <- fread(sprintf("zcat < %s",io$data)) %>% .[anno %in% opts$annos & sample %in% opts$cells] 
+stopifnot(length(setdiff(unique(met$sample),opts$cells))==0)
+
+met <- merge(met,sample_metadata[,c("sample","culture")], by=c("sample"))
+```
+
+```{r filter_data, echo=FALSE}
+
+# Remove features with low weight (all types of correlation)
+met <- met[weight >= opts$min.weight]
+
+# By coverage
+opts$min.coverage <- 0.5 # Keep only features with at least 1 read in opts$min.coverage fraction of cells
+keep_cov_sites <- met %>% split(.$anno) %>% map(~ .[,.(cov = .N / length(opts$cells)), by = c("id")] %>% .[cov >= opts$min.coverage, id])
+met <- met %>% split(.$anno) %>% map2(., names(.), function(x,y) x[id %in% keep_cov_sites[[y]]]) %>% rbindlist
+
+# By variance
+# opts$fraction.sites <- 0.5
+# keep_hv_sites <- met %>% split(.$anno) %>% map(~ .[,.(var = var(rate)), by="id"] %>% setorder(-var)  %>% head(n = nrow(.) * opts$fraction.sites) %>% .$id)
+opts$n.sites <- 500
+keep_hv_sites <- met %>% split(.$anno) %>% map(~ .[,.(var = var(rate)), by="id"] %>% setorder(-var)  %>% head(n = opts$n.sites) %>% .$id)
+met <- met %>% split(.$anno) %>% map2(.,names(.), function(x,y) x[id %in% keep_hv_sites[[y]]]) %>% rbindlist
+
+setkey(met,anno)
+
+# print(met[,length(unique(id)),by="anno"])
+```
+
+<!-- Create matrix  -->
+```{r}
+dmatrix_list <- list()
+for (anno in opts$annos) {
+  dmatrix_list[[anno]] <- met[anno,c("id","rate","sample")] %>% 
+    dcast(sample~id, value.var="rate") %>% matrix.please
+}
+```
+
+
+```{r heatmaps}
+
+annotation_rows <- data.frame(
+  row.names=sample_metadata$sample,
+  culture=sample_metadata$culture
+  # mean=sample_metadata$mean
+)
+
+for (anno in names(dmatrix_list)) {
+# for (anno in head(names(dmatrix_list),n=1)) {
+  pheatmap::pheatmap(dmatrix_list[[anno]], main=anno,
+                     cluster_rows = T, cluster_cols = T, annotation_row = annotation_rows,
+                     show_colnames = F, show_rownames = F)
+  # heatmap.2(dmatrix_list[[anno]], col=colorRampPalette(rev(brewer.pal(n = 7, name =
+  # "RdYlBu")))(100), na.color = "gray95", Rowv=T, Colv=T, density.info="none", trace="none",
+  #           key=T, labRow = FALSE, labCol = FALSE)
+}
+  
+```
+
+
+
+```{r pca, echo=FALSE}
+
+pc_list <- list()
+for (anno in names(dmatrix_list)) {
+  
+  # Perform PCA
+  pc_list[[anno]] <- pcaMethods::pca(dmatrix_list[[anno]], method="nipals", center=TRUE, nPcs=2)
+  # pc.out <- pcaMethods::pca(data_matrix_i, method="svd", center=TRUE, scale="uv", nPcs=2)
+  
+  # Extract principal components
+  to.plot <- pc_list[[anno]]@scores %>% as.data.table %>% .[,sample:=rownames(dmatrix_list[[anno]])] %>%
+    # melt(id.vars="sample", measure.vars=c("PC1","PC2"), variable.name="PC", value.name="value") %>%
+    merge(sample_metadata,by="sample")
+  
+  # Scree plot
+  # (...)
+  
+  # Scatterplot
+  p <- ggplot(to.plot, aes(x=PC1, y=PC2)) +
+    geom_point(size=2.5) +
+    # ggrepel::geom_text_repel(label=to.plot$sample, color="black", size=2) +
+    theme_bw()
+  print(p)
+}
+
+```
+
+```{r tsne, echo=FALSE}
+
+NEED TO IMPUTE FIRST
+
+tsne_list <- list()
+for (anno in names(dmatrix_list)) {
+  
+  # Perform t-SNE
+  # tsne <- tsne::tsne(asd_matrix_i) # Slow
+  tsne_list[[anno]] <- Rtsne::Rtsne(dmatrix_imputed_list[[anno]], check_duplicates=FALSE, pca=TRUE, perplexity=15, theta=0.5, dims=2) # Fast
+
+  # Extract t-SNE components
+  to.plot <- tsne_list[[anno]]$Y %>% as.data.table %>% .[,sample:=rownames(dmatrix_imputed_list[[anno]])] %>%
+    merge(sample_metadata,by="sample")
+  # p1 <- ggplot(to.plot, aes(x=V1, y=V2, color=stage)) +
+  #   geom_point(size=2.5) +
+  #   xlab("t-SNE component 1") + ylab("t-SNE component 2") +
+  #   # ggrepel::geom_text_repel(label=to.plot$sample, color="black", size=2) +
+  #   # ggrepel::geom_text_repel(label=to.plot$sample, color="black", size=2) +
+  #   theme_bw()
+  # print(p1)
+  
+  # Plot
+  p2 <- ggplot(to.plot, aes(x=V1, y=V2, color=lineage, shape=lineage)) +
+    geom_point(size=2.5) +
+    xlab("t-SNE component 1") + ylab("t-SNE component 2") +
+    # ggrepel::geom_text_repel(label=to.plot$sample, color="black", size=2) +
+    theme_bw()
+  print(p2)
+}
+```

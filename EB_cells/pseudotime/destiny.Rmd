@@ -1,0 +1,192 @@
+---
+title: "NMT-seq EB: pseudotime estimation using destiny"
+author: "Ricard Argelaguet"
+output: 
+  BiocStyle::html_document: 
+  fig_width: 10
+fig_height: 8
+---
+
+
+```{r load_modules, echo=FALSE, include=FALSE}
+library(data.table)
+library(purrr)
+library(scater)
+library(ggplot2)
+library(destiny)
+```
+
+```{r}
+io <- list()
+io$basedir <- "/Users/ricard/data/NMT-seq_EB"
+io$in.sample_metadata <- paste0(io$basedir,"/sample_sheet.csv")
+io$rna.infile <- paste(io$basedir,"rna/parsed/sceset.rds",sep="/")
+
+opts <- list()
+opts$cells <- fread(io$in.sample_metadata, header=T) %>% .[pass_rnaQC==T,sample]
+```
+
+```{r}
+metadata <- fread(io$in.sample_metadata, header=T) %>% .[sample%in%opts$cells]
+```
+
+```{r load_data, echo=FALSE}
+sce <- readRDS(io$rna.infile) 
+
+# Filter cells that did not pass QC
+sce <- sce[,opts$cells]
+
+# Keep N more variable/overdispersed genes
+N <- 500
+# genes <- names(tail(sort(apply(exprs(sce),1,var)), n=N))
+genes <- rownames(head(fData(sce)[order(fData(sce)$bioVar, decreasing = T),],n=N))
+sce <- sce[rownames(sce) %in% genes]
+```
+
+```{r}
+
+dm <- DiffusionMap(t(exprs(sce)))
+# plot(dm, col.by = 'variable')
+
+plot(
+    eigenvectors(dm)[,1],
+    eigenvectors(dm)[,2],
+    xlab="Diffusion component 1",
+    ylab="Diffusion component 2",
+    col = c("red","green")[as.numeric(factor(sce$lineage))],
+    pch = c(16,17)[as.numeric(factor(sce$lineage))]
+)
+
+
+tmp <- data.frame(
+  sample = colnames(sce),
+  lineage = sce$lineage,
+  x = eigenvectors(dm)[,1],
+  y = eigenvectors(dm)[,2]
+)
+
+
+p <- ggplot(tmp, aes(x,y)) +
+  geom_point(aes(color=lineage), alpha=0.7, size=2.0) +
+  labs(x="Diffusion component 1", y="Diffusion component 2") +
+  theme(
+    plot.title = element_text(size=20, hjust=0.5),
+    axis.title.y = element_text(colour="black", size=16, margin=margin(0,15,0,0)),
+    axis.title.x = element_text(colour="black", size=16, margin=margin(15,0,0,0)),
+    axis.text.x = element_text(colour="black",size=rel(1.4)),
+    axis.text.y = element_text(colour="black",size=rel(1.4)),
+    axis.line = element_line(colour="black", size=rel(0.9)),
+    axis.ticks = element_line(colour="black", size=rel(1.0)),
+    panel.background = element_blank(),
+    panel.grid = element_blank(),
+    legend.position="top",
+    legend.text=element_text(size=15),
+    legend.key = element_blank(),
+    legend.title=element_blank(),
+    legend.background=element_blank(),
+    panel.border = element_blank()
+  )
+
+# pdf("/Users/ricard/NMT-seq/rebuttal/EB/pseudotime/out/out/pseudotime.pdf", useDingbats = F)
+# print(p)
+# dev.off()
+```
+
+```{r}
+tmp <- data.frame(sample=colnames(sce), pseudotime=dm$DC1)
+write.table(tmp, "/Users/ricard/NMT-seq/rebuttal/EB/pseudotime/out/destiny.tsv", quote=F, sep="\t", row.names = F, col.names = T)
+```
+
+
+```{r, fig.height=2, fig.width=5}
+tmp <- data.frame(
+  sample = colnames(sce),
+  lineage = sce$lineage,
+  x = eigenvectors(dm)[,1],
+  y = eigenvectors(dm)[,2],
+  Esrrb = exprs(sce)["Esrrb", ],
+  Klf2 = exprs(sce)["Klf2", ],
+  Mreg = exprs(sce)["Mreg", ],
+  Mylpf = exprs(sce)["Mylpf", ],
+  t = exprs(sce)["T", ],
+  Prtg = exprs(sce)["Prtg", ],
+  
+ blah = "blah"
+  
+)
+
+p2 = ggplot(tmp, aes(blah, x)) + 
+  ggbeeswarm::geom_quasirandom(aes(colour = Esrrb), size=2.5) +
+  scale_colour_distiller(palette = "Spectral") +
+  coord_flip() +
+  ylab("Pseudotime Component 1") +
+  theme(
+    axis.title.x = element_text(colour="black", size=18),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(colour="black",size=rel(1.6)),
+    axis.text.y = element_blank(),
+    axis.line = element_line(colour="black", size=rel(1.0)),
+    axis.ticks = element_line(colour="black", size=rel(1.0)),
+    panel.background = element_blank(),
+    panel.grid = element_blank(),
+    legend.position="right",
+    legend.text=element_text(size=15),
+    legend.key = element_blank(),
+    legend.title=element_text(size=18),
+    legend.background=element_blank(),
+    panel.border = element_blank()
+  )
+print(p2)
+
+p3 = ggplot(tmp, aes(x, y, color=Esrrb)) + 
+  geom_point(size=2.0) +
+  scale_colour_distiller(palette = "Spectral") +
+  xlab("Pseudotime component 1") + ylab("Pseudotime Component 2") +
+  theme(
+    axis.title.x = element_text(colour="black", size=18),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(colour="black",size=rel(1.6)),
+    axis.text.y = element_text(colour="black",size=rel(1.6)),
+    axis.line = element_line(colour="black", size=rel(1.0)),
+    axis.ticks = element_line(colour="black", size=rel(1.0)),
+    panel.background = element_blank(),
+    panel.grid = element_blank(),
+    legend.position="right",
+    legend.text=element_text(size=15),
+    legend.key = element_blank(),
+    legend.title=element_text(size=18),
+    legend.background=element_blank(),
+    panel.border = element_blank()
+  )
+print(p3)
+```
+
+```{r}
+
+p = ggplot(tmp, aes(x=-x, y=Esrrb, color=Esrrb)) + 
+  geom_point(size=3) +
+  scale_colour_distiller(palette = "Spectral") +
+  xlab("Pseudotime component 1") + ylab("") +
+  theme(
+    axis.title.x = element_text(colour="black", size=18),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(colour="black",size=rel(1.6)),
+    axis.text.y = element_text(colour="black",size=rel(1.6)),
+    axis.line = element_line(colour="black", size=rel(1.0)),
+    axis.ticks = element_line(colour="black", size=rel(1.0)),
+    panel.background = element_blank(),
+    panel.grid = element_blank(),
+    legend.position="right",
+    legend.text=element_text(size=15),
+    legend.key = element_blank(),
+    legend.title=element_text(size=18),
+    legend.background=element_blank(),
+    panel.border = element_blank()
+  )
+print(p)
+
+pdf("/Users/ricard/Downloads/pseudotime.pdf", useDingbats = F, width=7, height=1.5)
+print(p)
+dev.off()
+```
+

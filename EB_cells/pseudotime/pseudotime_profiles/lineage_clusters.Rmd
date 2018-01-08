@@ -1,0 +1,237 @@
+---
+title: "NMT-Seq: Lineage determination from accessibility profiles"
+output: 
+  BiocStyle::html_document: 
+    fig_width: 12
+    fig_height: 8
+---
+
+```{r echo=FALSE, include=FALSE}
+suppressPackageStartupMessages(library(BPRMeth))
+suppressPackageStartupMessages(library(scater))
+suppressPackageStartupMessages(library(purrr))
+suppressPackageStartupMessages(library(weights))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(cowplot))
+suppressPackageStartupMessages(library(gridExtra))
+suppressPackageStartupMessages(library(scales))
+suppressPackageStartupMessages(library(grid))
+suppressPackageStartupMessages(library(data.table))
+```
+
+```{r echo=FALSE, include=FALSE}
+# Define ggplot2 theme for scatter plots
+scatter_theme <- function(){
+  p <- theme(
+      plot.title=element_text(size=28, face='bold', margin=margin(0,0,10,0), hjust=0.5),
+      plot.subtitle = element_text(size=20, face='bold', margin=margin(0,0,10,0), hjust=0.5),
+      axis.text=element_text(size=rel(1.75), color='black'),
+      axis.title=element_text(size=rel(1.95), color='black'),
+      axis.title.y = element_text(margin=margin(0,10,0,0)),
+      axis.title.x = element_text(margin=margin(10,0,0,0)),
+      legend.position="right",
+      panel.border=element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank()
+    )
+}
+
+# Scatter plot function
+scatter_plot <- function(data, xlabel="", ylabel="", title="", subtitle="", lm=FALSE, loess = FALSE) {
+  p <- ggplot(data, aes_string(x=names(data)[1], y=names(data)[2], col=names(data)[3])) +
+    labs(x=xlabel, y=ylabel, title=title, subtitle=subtitle) +
+    geom_point(shape = 16, size = 2.5, show.legend = FALSE, alpha = .55) + 
+    scatter_theme() + 
+    scale_color_gradient(low = "#0091ff", high = "#f0650e")
+  if (lm){
+    if (loess){ p <- p + geom_smooth() }#+ scale_x_continuous(trans = "log1p")
+    else{ p <- p + geom_smooth(method='lm') }
+  }
+}
+
+# Define ggplot2 boxplot theme for boxplots
+boxplot_theme <- function() {
+  p <- theme(
+    plot.title = element_text(size=30, hjust=0.5, margin=margin(0,0,20,0)),
+    axis.title.y = element_text(colour="black", size=20, vjust=1.5),
+    axis.title.x = element_text(colour="black", size=20, vjust=1.5, margin=margin(15,0,0,0)),
+    axis.text.x = element_text(colour="black",size=rel(1.6)),
+    axis.text.y = element_text(colour="black",size=rel(1.6)),
+    axis.line = element_line(colour="black", size=rel(0.7)),
+    axis.ticks.x = element_line(colour="black", size=rel(0.8)),
+    axis.ticks.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid = element_blank(),
+    legend.position="none",
+    legend.text=element_text(size=15),
+    legend.title=element_blank(),
+    legend.background=element_blank(),
+    panel.border = element_blank()
+  )
+}
+
+# Define ggplot2 theme for line plots
+line_theme <- function(){
+  p <- theme(
+      plot.title=element_text(size=25, face='bold', margin=margin(0,0,5,0), hjust=0.5),
+      axis.text=element_text(size=rel(1.15), color='black'),
+      axis.title=element_text(size=rel(1.55), color='black'),
+      axis.title.y = element_text(margin=margin(0,15,0,0)),
+      axis.title.x = element_text(margin=margin(15,0,0,0)),
+      axis.ticks.x = element_line(colour="black", size=rel(0.8)),
+      axis.ticks.y = element_blank(),
+      legend.position="right",
+      legend.key.size = unit(1.9, 'lines'),
+      legend.title=element_text(size=24, face='bold'),
+      legend.text=element_text(size=19),
+      panel.border=element_blank(),
+      panel.grid.major = element_line(colour = "gainsboro"),
+      #panel.grid.minor = element_line(colour = "grey"),
+      panel.background = element_blank()
+    )
+}
+
+#' Align cluster indices
+#' 
+#' \code{align_clusters} function helps to align cluster indices after each MCMC
+#' simulation for each data source.
+#' 
+#' @param Z1 Previous cluster assignments.
+#' @param Z2 Current cluster assignments
+#' @param type Object type of the cluster assignemnts, either 'vector' or
+#'   'matrix'.
+#'   
+#' @return The aligned indices of the current cluster assignments.
+#' 
+align_clusters <- function(Z1, Z2, type = "vec"){
+  if(type == "vec"){
+    for(k in 1:length(unique(Z1))){ # For each cluster k in previous Cluster
+      # Find Max 
+      Max <- sum(Z1==k & Z2==k)/(.01 + sum(Z1==k) + sum(Z2==k))
+      for(tempk in  1:length(unique(Z2))){ # For each cluster k in current Cluster
+        # Check if the proportions are higher than Max
+        if( (sum(Z1==k & Z2==tempk)/(.01 + sum(Z1==k) + sum(Z2==tempk))) > Max){
+          # Get the proportion that the two cluster indices are the same
+          Max <- sum(Z1==k & Z2==tempk)/(.01 + sum(Z1==k) + sum(Z2==tempk))
+          dummy <- (Z2==k)      # Keep indices that do not match
+          Z2[Z2==tempk] <- k    # Swap the incorrect indices
+          Z2[dummy] <- tempk    # Swap the incorrect indices
+        }
+      }
+    }
+  }else if(type == "mat"){
+    for(k in 1:dim(Z1)[2]){         # For each cluster k in previous Cluster
+      for(tempk in  1:dim(Z2)[2]){  # For each cluster k in current Cluster
+        Max <- sum(Z1==Z2)          # Number of matches between the cluster indices
+        Z2dummy <- Z2               # Keep the current indices in a dummy variable
+        Z2dummy[,k] = Z2[,tempk]    # Swap the incorrect indices
+        Z2dummy[,tempk] = Z2[,k]    # Swap the incorrect indices
+        if(sum(Z1==Z2dummy) > Max){ # If the swaps make a better alignment, update indices
+          Z2 <- Z2dummy
+        }
+      }
+    }
+  }
+  return(Z2) # Return the aligned cluster indices
+}
+```
+
+<!-- # Parse and filter data -->
+```{r echo=FALSE, include=FALSE}
+# Data
+io                     <- list()
+io$base_dir            <- "/home/cakapourani/Documents/Code/datasets/nmt-seq-data-eb"
+# io$base_dir          <- "/Users/ricard/data/NMT-seq"
+# io$base_dir          <- "/Users/kapouranis/Documents/Andreas/Code/datasets/nmt-seq-data"
+io$out_dir             <- "/home/cakapourani/Documents/Code/nmt-seq/rebuttal/EB/lineage_profiles/out/"
+io$rna_file            <- paste0(io$base_dir, "/rna/parsed/sceset.rds")
+io$acc_file            <- paste0(io$base_dir, "/acc/parsed/profiles/lineage_cluster_prom_200_200_basis11_GpCcov10_cellcov0.5.rds")
+io$meta_file           <- paste0(io$base_dir, "/sample_sheet.csv")
+io$genelist_dir        <- paste0(io$base_dir, "/metadata")
+io$plur_genes_file     <- paste0(io$genelist_dir, "/pluripotency_extended.tsv")
+io$h3k4me3_genes_file  <- paste0(io$genelist_dir, "/H3K4me3.bed")
+io$h3k27me3_genes_file <- paste0(io$genelist_dir, "/H3K27me3.bed")
+
+opts                   <- list()
+opts$annos             <- c("prom_500_500")
+opts$min.weight        <- 5      # Minimum weight per feature (met coverage)
+opts$min.s             <- 10     # minimum number of samples to do the correlation
+opts$gene_window       <- 1e3    # window length for the overlap between genes and features
+opts$threshold         <- 5e-2   # threshold for significant hits
+```
+
+
+<!-- # Load scRNA data -->
+```{r load_metadata, echo=FALSE, include=FALSE, warning=FALSE, message=FALSE}
+# Load cell metadata
+metadata <- fread(io$meta_file) %>% .[,c("sample", "culture", "pass_metQC", "pass_accQC", "pass_rnaQC", "lineage")] %>% 
+  na.omit() %>% .[pass_accQC ==  TRUE & pass_rnaQC == TRUE]
+```
+
+<!-- # Load scRNA data -->
+```{r load_rna, echo=FALSE, include=FALSE, warning=FALSE, message=FALSE}
+sceset       <- readRDS(file = io$rna_file)  # Load expression as SCESet object
+# Create data.table
+rna_dt       <- exprs(sceset) %>% t %>% as.data.table(keep.rownames = "sample") %>% melt(id.vars = "sample", value.name = "expr", variable.name = "gene")
+# Compute summary statistics for each gene across cells
+rna_all_st   <- rna_dt[, .(mean_expr = mean(expr), median_expr = median(expr), var_expr = var(expr), sd_expr = sd(expr), cv_expr = sd(expr)/mean(expr)), by = gene]
+N_cells      <- length(unique(rna_dt$sample))  # Number of unique cells
+rna_all_st   <- rna_all_st[, cv_expr := log2((1 + 1/(4 * N_cells)) * cv_expr)]  # Correct CV empirically
+# Extract biological variance, i.e. overdispersion
+rna_all_st <- rna_all_st[, overdispersion := fData(sceset)$bioVar]
+
+# Extract gene coordinates metadata to do the overlap
+rna_metadata <- fData(sceset) %>% tibble::rownames_to_column("gene") %>% as.data.table %>% .[,c("chr", "start", "end", "gene", "ens_id")]  %>% .[, chr := as.factor(sub("chr", "", chr))] %>% setnames("ens_id", "id")
+
+rna_all_st   <- merge(rna_metadata[, c("chr", "id", "gene")], rna_all_st, by = c("gene")) # Merge using all samples
+rna_dt       <- merge(rna_metadata[, c("chr", "id", "gene")], rna_dt, by = c("gene"))     # Merge using only samples that pass filtering
+rm(sceset)
+```
+
+<!-- # Load sc-NOMe-seq data -->
+```{r load_acc, echo=FALSE, include=FALSE, warning=FALSE, message=FALSE}
+accrna_dt  <- readRDS(io$acc_file) %>% .[cells > 15] # Load accessibility data
+# Add another column
+accrna_dt <- accrna_dt %>% .[, lineage_agreement := 0]
+# Get lineage agreement proportions
+for (i in 1:NROW(accrna_dt)){
+  # Get lineage assigment of each cell
+  cell_lineage <- metadata[sample %in% accrna_dt$cell_names[[i]]]$lineage
+  # Obtain the total number of cells
+  N <- length(cell_lineage)
+  # Convert Pluripotent to 1 and Differentiated to 2
+  ind <- which(cell_lineage == "Pluripotent")
+  if (length(ind) == 0){        # No pluripotent cells
+    cell_lineage[1:N] <- 2
+  }else if (length(ind) == N){  # All pluripotent cells
+    cell_lineage[1:N] <- 1
+  }else{                        # Mix of pluripotent/differentiated cells
+    cell_lineage[ind] <- 1
+    cell_lineage[-ind] <- 2
+  }
+  cell_lineage <- as.numeric(cell_lineage)
+  # Get cluster assignments
+  cell_labels <- accrna_dt$cell_clusters[[i]]
+  # Create a hot 1-k encoding of the labels
+  cell_lineage <- as.matrix(Matrix::sparseMatrix(1:N, cell_lineage, x=1))
+  cell_labels <- as.matrix(Matrix::sparseMatrix(1:N, cell_labels, x=1))
+  if (NCOL(cell_lineage) == 1){
+    cell_lineage <- cbind(cell_lineage, 0)
+  }else if (NCOL(cell_labels) == 1){
+    cell_labels <- cbind(cell_labels, 0)
+  }
+  
+  # Align cluster indices
+  cell_labels   <- align_clusters(cell_lineage, cell_labels, type = "mat")
+  # Count proportion of correct assignments
+  C_match <- sum((cell_labels == cell_lineage)[, 1]) / N
+  # Update agreement score
+  accrna_dt[i, lineage_agreement := C_match]
+}
+# Merge with expression data and sort 
+accrna_dt <- merge(rna_all_st, accrna_dt, by = c("id")) %>% setorder(-lineage_agreement) 
+plur_genes_file <- fread(io$plur_genes_file) %>% as.data.table %>% setnames(c("id", "gene"))
+
+saveRDS(accrna_dt, file = paste0(io$out_dir, "agreement_list_strict_filt.rds"))
+```

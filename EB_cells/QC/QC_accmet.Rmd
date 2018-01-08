@@ -1,0 +1,167 @@
+---
+title: "NMT-seq EB: quality control of methylation and accessibility data"
+output: 
+  BiocStyle::html_document: 
+    fig_width: 10
+    fig_height: 8
+---
+
+```{r load_modules, include=FALSE, echo=FALSE}
+library(data.table)
+library(purrr)
+library(tidyr)
+library(ggplot2)
+library(cowplot)
+```
+
+```{r funcs, echo=FALSE}
+barplot_theme <- function() {
+  p <- theme(
+    plot.title = element_text(size=30, hjust=0.5),
+    # axis.title.x = element_text(colour="black", size=25, vjust=1.5),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(colour="black", size=20),
+    # axis.text.x = element_text(colour="black",size=rel(1.6)),
+    axis.text.y = element_text(colour="black",size=rel(1.5)),
+    axis.line = element_line(colour="black", size=rel(0.7)),
+    axis.ticks.x = element_line(colour="black", size=rel(1.0)),
+    axis.ticks.y = element_line(colour="black", size=rel(1.0)),
+    legend.position="none",
+    panel.background = element_blank(),
+    panel.grid = element_blank(),
+    panel.border = element_blank()
+  )
+}
+```
+
+```{r define_opts, echo=FALSE, include=FALSE}
+
+## I/O ##
+io <- list()
+io$in.metadata <- "/Users/ricard/data/NMT-seq_EB/sample_sheet.csv"
+io$in.metdir <- "/Users/ricard/data/NMT-seq_EB/met/raw/merged/binarised"
+io$in.accdir <- "/Users/ricard/data/NMT-seq_EB/acc/raw/merged/binarised"
+io$file <- "/Users/ricard/NMT-seq/rebuttal/EB/stats/out/sample_stats.txt"
+io$outdir <- "/Users/ricard/NMT-seq/rebuttal/EB/QC/out"
+
+## Options ##
+opts <- list()
+opts$cells <- fread("/Users/ricard/data/NMT-seq_EB/sample_sheet.csv", header=T, showProgress=F) %>% .[method=="NMT",sample]
+
+# opts$mapping_threshold <- 0.10
+opts$met_coverage_threshold <- 2e5
+opts$acc_coverage_threshold <- 2e6
+```
+
+<!-- <!-- # Mapping efficiency --> -->
+<!-- ```{r mapping_efficiency, echo=FALSE, include=TRUE} -->
+<!-- # Load Bismark report file to assess mapping efficiencies -->
+<!-- bismark = fread("/Users/ricard/data/NMT-seq_EB/bismark_report.txt") %>%  -->
+<!--   .[, File := map(File, strsplit, split = "_") %>% flatten() %>% map_chr(3)] %>%  -->
+<!--   .[, lapply(.SD, mean), by=File] %>%  -->
+<!--   .[, mapping := `Aligned Reads` / `Total Reads`] %>% -->
+<!--   setnames("File","sample") %>% .[sample %in% opts$cells] -->
+
+<!-- efficiency <- data.table(sample=opts$cells) %>% merge(bismark,by="sample", all.x=TRUE) %>% -->
+<!--   .[,mapping:=ifelse(is.na(mapping),0,mapping)] -->
+
+<!-- foo <- efficiency[,c("sample","mapping")] %>% setkey(mapping) %>% .[,col:=mapping] %>% .[,sample:=factor(sample,levels=sample)] -->
+<!-- cellcolor <- c("black","red")[as.numeric(foo$mapping<opts$mapping_threshold)+1] -->
+
+<!-- p1 <- ggplot(foo, aes(x=sample, y=mapping, fill=col)) + -->
+<!--   geom_bar(stat='identity', position="dodge") + -->
+<!--   geom_hline(yintercept=opts$mapping_threshold, colour="blue", linetype="dashed") + -->
+<!--   scale_fill_gradient(low="red", high="green") + -->
+<!--   labs(y="Mapping efficiency") + -->
+<!--   barplot_theme() + -->
+<!--   theme( -->
+<!--     axis.text.x = element_text(colour="black", color=cellcolor, angle=90, size=10, vjust=0.5, hjust=1.0) -->
+<!--     ) -->
+<!-- print(p1) -->
+
+<!-- # pdf(file="out/mapping_efficiency.pdf", width=10, height=5) -->
+<!-- # print(p) -->
+<!-- # dev.off() -->
+<!-- ``` -->
+
+
+```{r load_metadata}
+metadata <- fread(io$in.metadata)
+```
+
+<!-- Statistics file are generated using stats_accmet_samples_raw.Rmd -->
+```{r read_stats, echo=FALSE}
+stats <- fread(io$file) %>% .[sample%in%opts$cells] %>% merge(metadata,by="sample")
+```
+
+```{r}
+stats[,sample:=gsub("Plate","P",sample)]
+```
+
+<!-- QC plot separately for methylation and accessibility -->
+```{r}
+
+# Methylation
+tmp <- stats[context=="CG",c("sample","coverage")] %>% setkey(coverage) %>% .[,sample:=factor(sample,levels=sample)]
+tmp$cellcolor <- c("black","red")[as.numeric(tmp$coverage < opts$met_coverage_threshold)+1]
+
+p1 <- ggplot(tmp, aes(x=sample, y=coverage)) +
+  geom_bar(stat="identity", position="dodge", fill="#F8766D", color="black") +
+  labs(title="", x="", y="Number of observed CpG sites") +
+  geom_hline(yintercept=opts$met_coverage_threshold, colour="red", linetype="dashed") +
+  barplot_theme() +
+  # scale_y_continuous(expand=c(0,0)) +
+  scale_y_continuous(expand=c(0,0), limits=c(0,5e+6)) +
+  theme(
+    axis.text.x = element_text(angle=90, size=10, vjust=0.5, hjust=1.0, color=tmp$cellcolor)
+    # axis.text.x = element_blank()
+  )
+print(p1)
+
+# Accessibility
+tmp <- stats[context=="GC",c("sample","coverage")] %>% setkey(coverage) %>% .[,sample:=factor(sample,levels=sample)]
+tmp$cellcolor <- c("black","red")[as.numeric(tmp$coverage < opts$acc_coverage_threshold)+1]
+
+p2 <- ggplot(tmp, aes(x=sample, y=coverage)) +
+  geom_bar(stat="identity", position="dodge", fill="#00BFC4", color="black") +
+  labs(title="", x="", y="Number of observed GpC sites") +
+  geom_hline(yintercept=opts$acc_coverage_threshold, colour="blue", linetype="dashed") +
+  # scale_y_continuous(expand=c(0,0)) +
+  scale_y_continuous(expand=c(0,0), limits=c(0,3.5e+7)) +
+  barplot_theme() +
+  theme(
+    axis.text.x = element_text(angle=90, size=10, vjust=0.5, hjust=1.0, color=tmp$cellcolor)
+    # axis.text.x = element_blank()
+  )
+print(p2)
+```
+
+<!-- <!-- QC plot jointly for methylation and accessibility --> -->
+<!-- ```{r, echo=FALSE} -->
+<!-- cellcolor <- c("black","red")[as.numeric(stats$CGs < opts$met_coverage_threshold | stats$GCs < opts$acc_coverage_threshold)+1] -->
+<!-- foo <- stats[,c("sample","CGs","GCs")] %>% melt(id.vars="sample",measure.vars=c("CGs","GCs"), variable.name="context") -->
+
+<!-- p <- ggplot(foo, aes(x=sample, y=value, fill=context)) + -->
+<!--   geom_bar(stat="identity", position="dodge") + -->
+<!--   labs(title="", x="", y="Number of observed sites") + -->
+<!--   geom_hline(yintercept=opts$met_coverage_threshold, colour="red", linetype="dashed") + -->
+<!--   geom_hline(yintercept=opts$acc_coverage_threshold, colour="blue", linetype="dashed") + -->
+<!--   scale_fill_discrete(labels=c("CG methylation","GC accessibility")) + -->
+<!--   barplot_theme() + -->
+<!--   theme( -->
+<!--     axis.text.x = element_text(colour="black", color=cellcolor, angle=90, size=10, vjust=0.5, hjust=1.0) -->
+<!--   ) -->
+<!-- print(p2) -->
+
+<!-- # pdf(file="out/coverage.pdf", width=10, height=5) -->
+<!-- # print(p) -->
+<!-- # dev.off() -->
+<!-- ``` -->
+
+```{r, echo=FALSE, include=FALSE}
+p <- cowplot::plot_grid(p1, p2, ncol=2, nrow=1)
+pdf(file=paste0(io$outdir,"/metacc.pdf"), width=19, height=7)
+print(p)
+dev.off()
+```
+
