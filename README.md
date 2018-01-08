@@ -20,5 +20,5 @@ The parsed data is provided upon request.
 
 Contact
 -------
-* Computational analysis: Ricard Argelaguet (ricard@ebi.ac.uk) or Andreas Kapourani (c.a.kapourani@sms.ed.ac.uk)
+* Computational analysis: Ricard Argelaguet (ricard@ebi.ac.uk) or Andreas Kapourani (c.a.kapourani@ed.ac.uk)
 * Experimental protocol: Stephen Clark (stephen.clark@babraham.ac.uk)
