@@ -17,15 +17,11 @@ Content
 -------
 * `/preprocessing/`: preprocessing scripts
 * `/QC/`: QC analysis to filter low-quality cells
-* `/acc_conservation/`: accessibility conservation using clustering of single-cell accessibility profiles
 * `/correlations/`: pairwise correlations between different omic layers
-* `/differential/`: differential analysis between subpopulations
 * `/dimensionality_reduction/`: dimensionality reduction (PCA, t-SNE, ZIFA, etc.)
 * `/heatmap/`: heatmap plots of the molecular layers
 * `/pseudobulk_profiles/`: methylation and accessibility profiles using a running window with pseudobulked data
-* `/pseudotime/`: coupling of molecular layers along a pseudotime trajectory
 * `/stats/`: calculation of methylation and accessibility statistics (mean, coverage, etc.)
-* `/zoom/`: plot of zoomed methylation and accessibility values in single genes
 
 
 Data
