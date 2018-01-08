@@ -1,0 +1,119 @@
+---
+title: "NMT-seq: methylation correlation between samples"
+output:
+  BiocStyle::html_document: 
+    toc: false
+    fig_width: 10
+    fig_height: 8
+---
+
+```{r load_modules, echo=FALSE, include=FALSE}
+library(data.table)
+library(purrr)
+library(ggplot2)
+```
+
+```{r define_opts, echo=FALSE}
+
+## Define I/O ##
+io <- list()
+
+if (grepl("ricard",Sys.info()['nodename'])) {
+  io$in.metadata <- "/Users/ricard/data/NMT-seq/sample_info.txt"
+  # io$in.data <- "/Users/ricard/data/NMT-seq/met/raw/allele_unspecific"
+  io$in.data <- "/Users/ricard/data/NMT-seq/acc/raw/allele_unspecific"
+  io$stats <- "/Users/ricard/NMT-seq/stats/samples/sample_stats.txt"
+  io$outdir <- "/Users/ricard/NMT-seq/stats/samples/out"
+} else {
+  io$in.metadata <- "/hps/nobackup/stegle/users/ricard/NMT-seq/sample_info.txt"
+  # io$in.data <- "/hps/nobackup/stegle/users/ricard/NMT-seq/met/raw/allele_unspecific/filtered"
+  io$in.data <- "/hps/nobackup/stegle/users/ricard/NMT-seq/acc/raw/allele_unspecific/filtered"
+  io$stats <- "/homes/ricard/NOME-seq/stats/samples/out/sample_stats.txt"
+  io$outdir <- "/homes/ricard/NOME-seq/stats/samples/out"
+}
+
+## Define options ##
+opts <- list()
+
+# Define which context to use 
+opts$context <- "GC"
+
+# Define which cells to use
+if (opts$context == "CG") {
+  opts$cells <- fread(io$in.metadata) %>% .[pass_metQC==T, sample]
+} else {
+  opts$cells <- fread(io$in.metadata) %>% .[pass_accQC==T, sample]
+}
+```
+
+
+```{r load_metadata, echo=FALSE}
+metadata <- fread(io$in.metadata) %>% .[sample %in% opts$cells] %>%
+  merge(fread(io$stats)[context==opts$context], by="sample")
+```
+
+```{r compute_cor, echo=FALSE}
+outfile <- paste0(io$outdir,"/",opts$context,"_cor.txt")
+
+if (file.exists(outfile)) {
+  r <- read.table(outfile)
+  # colnames(r) <- sub(pattern="X", replacement="", colnames(r)) # ????????
+} else {
+  r <- matrix(nr=length(opts$cells), nc=length(opts$cells)); diag(r) <- 1
+  # n <- matrix(nr=length(opts$cells), nc=length(opts$cells)); diag(r) <- 1
+  rownames(r) <- opts$cells; colnames(r) <- opts$cells
+  for (i in 1:length(opts$cells)) {
+    print(sprintf("Calculating correlations for %s (%d/%d)...",opts$cells[i], i, length(opts$cells)))
+    data_i <- fread(sprintf("zcat < %s/%s.tsv.gz",io$in.data,opts$cells[i])) %>% setnames(c("chr","pos","rate"))
+    for (j in i:length(opts$cells)) {
+      if (i!=j) {
+        data_j <- fread(sprintf("zcat < %s/%s.tsv.gz",io$in.data,opts$cells[j])) %>% setnames(c("chr","pos","rate"))
+        data <- merge(data_i,data_j, by=c("chr","pos"))
+        r[i,j] <- r[j,i] <- cor(data$rate.x, data$rate.y)
+        # n[i,j] <- n[j,i] <- nrow(data)
+      }
+    }
+  }
+  write.table(r, file=outfile, sep="\t", row.names=T, col.names=T, quote=F)
+}
+
+r <- r[opts$cells,opts$cells]
+```
+
+<!-- ```{r permute} -->
+<!-- ntrials <- 2 -->
+<!-- r_list <- lapply(1:ntrials, function(n) matrix(nr=length(opts$cells), nc=length(opts$cells))) -->
+<!-- for (i in 1:length(opts$cells)) { -->
+<!--   print(sprintf("Loading %s methylation (%d/%d)...",opts$cells[i], i, length(opts$cells))) -->
+<!--   data_i <- fread(sprintf("zcat < %s/%s.tsv.gz",io$in.data,opts$cells[i])) %>% setnames(c("chr","pos","rate")) -->
+<!--   for (j in i:length(opts$cells)) { -->
+<!--     if (i!=j) { -->
+<!--       data_j <- fread(sprintf("zcat < %s/%s.tsv.gz",io$in.data,opts$cells[j])) %>% setnames(c("chr","pos","rate")) -->
+<!--       data <- merge(data_i,data_j, by=c("chr","pos")) -->
+<!--       for (n in 1:ntrials) { -->
+<!--         data$rate.x <- sample(data$rate.x) -->
+<!--         data$rate.y <- sample(data$rate.y) -->
+<!--         r_list[[n]][i,j] <- r_list[[n]][j,i] <- cor(data$rate.x, data$rate.y) -->
+<!--       } -->
+<!--     } -->
+<!--   } -->
+<!-- } -->
+<!-- r_null <- Reduce('+', r_list)/ntrials -->
+<!-- # write.table(r, file=io$out.file, sep="\t", row.names=T, col.names=T, quote=F) -->
+<!-- ``` -->
+
+```{r corrplot, echo=FALSE}
+annos <- data.frame(
+  row.names = metadata$sample,
+  culture=metadata$culture,
+  mean=metadata$mean
+)
+annos <- annos[order(annos$mean),]
+
+pdf(file=paste0(io$outdir,"/cor_",opts$context,"_heatmap.pdf"), height = 6, width=9)
+pheatmap::pheatmap(r[rownames(annos),rownames(annos)], cluster_rows=F, cluster_cols=F, show_rownames=F, show_colnames=F, annotation_col=annos)
+  dev.off()
+```
+
+
+

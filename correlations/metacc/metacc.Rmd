@@ -1,0 +1,309 @@
+---
+title: "NMT-Seq ESC: Correlation between accessibility and methylation"
+output: 
+  BiocStyle::html_document: 
+    fig_width: 12
+    fig_height: 8
+---
+
+```{r echo=FALSE, include=FALSE}
+suppressPackageStartupMessages(library(scater))
+suppressPackageStartupMessages(library(purrr))
+suppressPackageStartupMessages(library(weights))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(cowplot))
+suppressPackageStartupMessages(library(gridExtra))
+suppressPackageStartupMessages(library(grid))
+suppressPackageStartupMessages(library(data.table))
+source("/Users/ricard/NMT-seq/correlations/utils.R")
+```
+
+```{r echo=FALSE, include=FALSE}
+```
+
+<!-- # Parse and filter data -->
+```{r echo=FALSE, include=FALSE}
+# Data
+io   <- list()
+io$base_dir   <- "/Users/ricard/data/NMT-seq"
+# io$base_dir   <- "/Users/kapouranis/Documents/Andreas/Code/datasets/nmt-seq-data"
+# io$base_dir   <- "/home/cakapourani/Documents/Code/datasets/nmt-seq-data"
+io$annos_dir  <- paste0(io$base_dir, "/features/filt")
+io$in.sample_metadata <- paste0(io$base_dir,"/sample_info.txt")
+io$met_file   <- paste0(io$base_dir, "/met/parsed/met_data.tsv.gz")
+io$acc_file   <- paste0(io$base_dir, "/acc/parsed/acc_data.tsv.gz")
+io$outdir <- "/Users/ricard/NMT-seq/correlations/metacc/out"
+
+# Filtering parameters
+opts <- list()
+opts$met.min.weight <- 3      # minimum weight per feature (met)
+opts$acc.min.weight <- 3      # minimum weight per feature (acc)
+opts$min.coverage   <- 0.4    # minimum coverage per feature across samples (met/acc)
+opts$fraction.sites <- 0.5    # fraction of sites (met/acc) to keep based on variance
+# opts$min.n          <- 2000    # minimum number of features per annotation
+opts$min.s          <- 20     # minimum number of samples to do the correlation
+opts$n_perms        <- 100    # Number of random permutations
+opts$threshold_fdr  <- 0.10   # pvalue threshold for significance in FDR
+
+opts$method <- "pearson"      # correlation type
+opts$weight <- TRUE           # weighted correlation?
+
+opts$cor_samples <- F         # do correlation across samples?
+opts$permutation <- F         # do permutation test?
+
+opts$pseudobulk <- T          # Include pseudobulk estimates for the correlation across genes?
+
+# Define which annotations to use and the order for plotting
+opts$met_annos <- c("prom_2000_2000", "super_enhancers", "CTCF","genebody","p300","Oct4","DHS","Nanog","CGI","activeEnhancers_ENCODE")
+opts$acc_annos <- c("prom_2000_2000", "super_enhancers", "CTCF","genebody","p300","Oct4","DHS","Nanog","CGI","activeEnhancers_ENCODE")
+
+opts$anno_names <- c(
+  "prom_2000_2000_cgi"="CGI promoters",
+  "prom_2000_2000_noncgi"="non-CGI promoters",
+  "prom_2000_2000$"="Promoters",
+  "activeEnhancers_ENCODE"="Active enhancers",
+  "super_enhancers"="Super enhancers",
+  "primed_enhancers"="Primed enhancers",
+  "exons"="Exons",
+  "introns"="Introns",
+  "genebody"="Gene body"
+)
+
+# Define which cells to use
+opts$cells <- fread(io$in.sample_metadata, header=T) %>% .[pass_metQC==T & pass_accQC==T,sample]
+```
+
+<!-- Load sample metadata -->
+```{r}
+sample_metadata <- fread(io$in.sample_metadata, header=T) %>% .[sample%in%opts$cells]
+```
+
+
+<!-- Load methylation and accessibility data -->
+```{r load_data, echo=FALSE, include=FALSE}
+
+# Load methylation data
+met <- fread(sprintf("zcat < %s", io$met_file)) %>% as.data.table %>% 
+  .[anno%in%opts$met_annos & sample%in%opts$cells] %>% .[,anno:=factor(anno, levels=opts$met_annos)] %>%
+  .[,anno:=stringr::str_replace_all(anno, opts$anno_names)]
+
+# Load accessibility data
+acc <- fread(sprintf("zcat < %s", io$acc_file)) %>% as.data.table %>% 
+  .[anno%in%opts$acc_annos & sample%in%opts$cells] %>% 
+  .[,anno:=factor(anno, levels=opts$acc_annos)] %>% .[,anno:=stringr::str_replace_all(anno, opts$anno_names)]
+
+# Combine the two data sets
+metacc <- merge(
+  met[,c("sample", "id", "anno", "rate", "weight")] %>% setnames(c("rate", "weight"), c("met_rate", "met_weight")),
+  acc[,c("sample", "id", "anno", "rate", "weight")] %>% setnames(c("rate", "weight"), c("acc_rate", "acc_weight")),
+  by=c("sample", "id", "anno")
+)
+# rm(met, acc)
+
+```
+
+<!-- Filter data to correlate acros loci -->
+```{r}
+# Remove features with low weight (all types of correlation)
+metacc <- metacc[met_weight >= opts$met.min.weight & acc_weight >= opts$acc.min.weight]
+```
+
+<!-- Filter data to correlate acros samples -->
+```{r filter, echo=FALSE}
+
+if (opts$cor_samples) {
+  
+  # To correlate across samples
+  metacc_filt <- copy(metacc)
+  
+  ## Filter sites with low coverage
+  nsamples <- length(unique(metacc$sample))
+  metacc_filt <- metacc_filt[, cov := .N / nsamples, by = c("id", "anno")] %>% .[cov >= opts$min.coverage] %>% .[, cov := NULL]
+  metacc <- metacc[, cov := .N / nsamples, by = c("id", "anno")] %>% .[cov >= opts$min.coverage] %>% .[, cov := NULL]
+  
+  ## Remove constant sites and filter based on variability (separately for each feature)
+  keep_hv_sites <- metacc_filt %>% split(.$anno) %>% map(~ .[,.(met_var = wtd.var(met_rate, met_weight), acc_var = wtd.var(acc_rate, acc_weight)), by = c("id")] %>% .[met_var > 2 | acc_var > 2] %>% .[, var := acc_var * met_var] %>% setorder(-var)  %>% head(n = nrow(.) * opts$fraction.sites) %>% .$id)
+  metacc_filt <- metacc_filt %>% split(.$anno) %>% map2(.,names(.), function(x,y) x[id %in% keep_hv_sites[[y]]]) %>% rbindlist
+  
+  ## Filter id pairs with small number of samples to do the correlation
+  metacc_filt <- metacc_filt[,n:=.N, by=c("id","anno")] %>% .[n >= opts$min.s] %>% .[,n:=NULL]
+}
+```
+
+<!-- Compute correlations  -->
+```{r cor_rate, echo=FALSE, include=FALSE}
+# Weighted correlation
+if (opts$weight == TRUE){
+  if (opts$method != "pearson") { print("Weighted correlation only supported for pearson"); stop() }
+  if (opts$cor_samples) {
+    # Correlate rate across samples
+    cor_samples <- metacc_filt[, wtd.cor(met_rate, acc_rate, met_weight)[, c("correlation", "t.value", "p.value")], by = c("id", "anno")]
+  }
+  # Correlate rate across genes
+  cor_features <- metacc[, wtd.cor(met_rate, acc_rate, met_weight)[, c("correlation", "t.value", "p.value")], by = c("sample", "anno")]
+}else{
+  if (opts$cor_samples) {
+    # Correlate rate across samples
+    cor_samples <- metacc_filt[, .(V1 = unlist(cor.test(met_rate, acc_rate, alternative = "two.sided", method = opts$method)[c("estimate", "statistic", "p.value")])), by = c("id", "anno")]
+  }
+  # Correlate rate across genes
+  cor_features <- metacc[, .(V1 = unlist(cor.test(met_rate, acc_rate, alternative = "two.sided", method = opts$method)[c("estimate", "statistic", "p.value")])), by = c("sample", "anno")]
+}
+
+# Compute adjusted p-values across samples (both FDR and Bonferroni)
+if (opts$cor_samples) {
+  cor_samples <- cor_samples %>% .[, para := c("r", "t", "p")] %>% dcast(id + anno ~ para, value.var = "V1") %>%
+        .[, c("padj_fdr", "padj_bonf") := list(p.adjust(p, method = "fdr"), p.adjust(p, method = "bonferroni")), by = anno] %>%
+        .[, c("log_padj_fdr","log_padj_bonf") := list(-log10(padj_fdr), -log10(padj_bonf))] %>%
+        .[, sig := padj_fdr <= opts$threshold_fdr] %>%  setorder(padj_fdr)
+}
+  
+
+# Compute adjusted p-values across genes (both FDR and Bonferroni)
+cor_features <- cor_features %>% .[,para := c("r", "t", "p")] %>% dcast(sample + anno ~ para, value.var = "V1") %>% 
+      .[, c("padj_fdr", "padj_bonf") := list(p.adjust(p, method = "fdr"), p.adjust(p, method = "bonferroni")), by = anno] %>%
+      .[, c("log_padj_fdr", "log_padj_bonf") := list(-log10(padj_fdr), -log10(padj_bonf))] %>%
+      .[, sig := padj_fdr <= opts$threshold_fdr] %>% setorder(padj_fdr)
+```
+
+
+<!-- Run permutation test for correlations  -->
+```{r perm_cor_rate, echo=FALSE, include=FALSE}
+if (opts$cor_samples & opts$permutation) {
+  pp_vals <- vector(mode = "numeric", length = length(cor_samples$p))
+  for (k in 1:opts$n_perms){
+    # Copy original data
+    metacc_filt_perm <- copy(metacc_filt)
+    # Permute accessibility rates
+    metacc_filt_perm <- metacc_filt_perm[, acc_rate := sample(acc_rate), by = c("id", "anno")]
+    # Compute correlation across samples
+    # cor_samples_perm <- metacc_filt_perm[, .(p = wtd.cor(met_rate, acc_rate, met_weight)[, c("p.value")]), by = c("id", "anno")]
+    cor_samples_perm <- metacc_filt_perm[, .(p = cor.test(met_rate, acc_rate, method=opts$method)[["p.value"]]), by = c("id","anno")]
+    # For each annotation sort by p-value
+    cor_samples_perm <- cor_samples_perm %>% split(.$anno) %>% map(~ .[,.(anno = anno, p = sort(p))]) %>% rbindlist
+    # Add the sorted p-values
+    pp_vals <- pp_vals + cor_samples_perm %>% .[, p]
+  }
+  # Compute the average p-values
+  pp_vals <- pp_vals / opts$n_perms
+  # Store them in a data.table for later analysis
+  cor_samples_perm <- cor_samples_perm[, p := pp_vals]
+}
+```
+
+<!-- Rename annotations -->
+```{r rename, echo=FALSE, include=FALSE}
+if (opts$cor_samples) {
+  cor_samples$anno <- stringr::str_replace_all(cor_samples$anno, opts$anno_names) %>% as.factor
+  if (opts$permutation)
+    cor_samples_perm$anno <- stringr::str_replace_all(cor_samples_perm$anno, opts$anno_names) %>% as.factor
+}
+cor_features$anno <- stringr::str_replace_all(cor_features$anno, opts$anno_names) %>% as.factor
+```
+
+<!-- Boxplot of correlations between accessibility and methylation -->
+```{r boxplot_expr, echo=FALSE, warning=FALSE, include=TRUE}
+
+# Boxplot of correlations across samples
+if (opts$cor_samples) {
+  p <- ggplot(cor_samples[,c("anno","r")], aes(x=anno, y=r, fill=anno)) +
+    geom_boxplot(alpha=0.8, outlier.shape=NA, fill="yellowgreen") + geom_hline(yintercept=0, colour="black", linetype="dashed") +
+    labs(title="Correlation across cells", x="", y="Weighted Pearson correlation coefficient") +
+    coord_flip() + boxplot_theme()
+  print(p)
+  # pdf(file=paste0(io$outdir, "/metacc_boxplot_acrosssamples.pdf"), width=8, height=6)
+  # print(p)
+  # dev.off()
+}
+
+# Boxplot of correlations across genes
+p <- ggplot(cor_features[,c("anno","r")], aes(x=anno, y=r, fill=anno)) +
+  geom_boxplot(alpha=0.8, outlier.shape=NA, fill="yellowgreen") + 
+  geom_hline(yintercept=0, colour="black", linetype="dashed") +
+  labs(title="", x="", y="Correlation coefficient") +
+  coord_flip(ylim=c(-0.9,0.05)) +  
+  boxplot_theme()
+print(p)
+# pdf(file=paste0(io$outdir, "/metacc_boxplot_acrossfeatures.pdf"), width=8, height=6)
+# print(p)
+# dev.off()
+
+```
+
+
+```{r}
+if (opts$pseudobulk) {
+  metacc_pseudobulk <- metacc[,.(met_rate=round(mean(met_rate),2), acc_rate=round(mean(acc_rate),2), weight=.N),by=c("id","anno")] %>% .[,sample:="pseudobulk"] 
+  
+   cor_features_pseudobulk <- metacc_pseudobulk[, wtd.cor(met_rate, acc_rate, weight)[, c("correlation", "t.value", "p.value")], by = c("sample", "anno")] %>% 
+     .[,para := c("r", "t", "p")] %>% dcast(sample + anno ~ para, value.var = "V1") %>% 
+     .[, c("padj_fdr", "padj_bonf") := list(p.adjust(p, method = "fdr"), p.adjust(p, method = "bonferroni")), by = anno] %>%
+      .[, c("log_padj_fdr", "log_padj_bonf") := list(-log10(padj_fdr), -log10(padj_bonf))] %>%
+      .[, sig := padj_fdr <= opts$threshold_fdr] %>% setorder(padj_fdr)
+  
+  cor_features_pseudobulk[,anno:=stringr::str_replace_all(cor_features_pseudobulk$anno, opts$anno_names)]
+  
+  p <- p + geom_point(aes(x=anno, y=r), color="black", fill="yellowgreen", shape=21, size=3.0, data=cor_features_pseudobulk)
+  print(p)
+}
+```
+
+<!-- Include bulk correlations estimates  -->
+```{r}
+
+opts$bulk <- T
+
+if (opts$bulk) {
+  cor_genes_bulk <- fread("/Users/ricard/NMT-seq/bulk_comparison/metacc/out/cor_metacc.txt") %>%
+    .[anno%in%opts$met_annos] %>% 
+    .[,anno:=stringr::str_replace_all(anno, opts$anno_names)] %>%
+    .[,anno:=factor(anno,levels=levels(cor_features$anno))]
+    
+  p <- p + geom_point(aes(x=anno, y=r), color="black", fill="yellowgreen", shape=8, size=3.0, data=cor_genes_bulk)
+  print(p)
+  
+  pdf(file=paste0(io$outdir, "/metacc_boxplot_acrossloci_witbulk.pdf"), width=6, height=5, useDingbats = F)
+  print(p)
+  dev.off()
+}
+
+```
+
+ <!-- Volcano plot of p-values against Pearson's r and QQ-plot of p-values -->
+```{r corplot, messages=FALSE, echo=FALSE, include=TRUE, warning=FALSE, fig.height=6.5, fig.width=16}
+
+if (opts$cor_samples & opts$permutation) {
+  # load("out/cor.RData")
+  pp = qq <- list()
+  for (n in unique(cor_samples$anno)) {
+    
+    # Compute positive and negative hits in terms of correlation
+    negative_hits <- cor_samples[anno==n & sig==TRUE & r<0,id]
+    positive_hits <- cor_samples[anno==n & sig==TRUE & r>0,id]
+    all <- nrow(cor_samples[anno == n,])
+    
+    # Create volcano plot
+    pp[[n]] <- gg_volcano_plot(cor_samples[anno == n,], title = "")
+    
+    # Crete qqplot
+    qq[[n]] <- gg_qqplot(cor_samples[anno == n, ], cor_samples_perm[anno == n]$p, title = "")
+    
+    # Plot and save
+    print(plot_grid(pp[[n]], qq[[n]], labels = c("", ""), label_size = 20, ncol = 2, nrow = 1))
+    pdf(file=paste0(io$outdir,"/metacc_cor_", n, ".pdf"), width = 14, height = 8, useDingbats = FALSE)
+    grid.arrange(pp[[n]], qq[[n]], ncol=2, top = textGrob(n, gp=gpar(fontsize=29, fontface = "bold")), newpage = TRUE)
+    dev.off()
+  }
+}
+```
+
+<!-- Save results -->
+```{r}
+fwrite(round_df(cor_features,5), paste0(io$outdir,"/metrna_cor_loci.tsv"), sep="\t")
+if (opts$cor_samples) {
+  fwrite(round_df(cor_samples,5), paste0(io$outdir,"/metrna_cor_samples.tsv"), sep="\t")
+  # if (opts$permutation) {
+  #   fwrite(round_df(cor_samples_perm,5), paste0(io$outdir,"/metrna_cor_samples_perm.tsv"), sep="\t")
+  # }
+}
+```

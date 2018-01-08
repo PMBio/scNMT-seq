@@ -1,0 +1,238 @@
+---
+# title: "NMT-seq: Correlation between DNA accessibility and methylation"
+output: 
+  BiocStyle::html_document: 
+    fig_width: 12
+    fig_height: 8
+---
+
+```{r echo=FALSE, include=FALSE}
+suppressPackageStartupMessages(library(scater))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(purrr))
+suppressPackageStartupMessages(library(ggplot2))
+```
+
+```{r definefuncs, echo=FALSE}
+
+# annotation: a data.table or data.frame with columns (chr,start,end,strand,id)
+loadMultipleMetData <- function(indir, cells, annotation=NULL) {
+  data_list <- list()
+  for (cell in cells) {
+    if (file.exists(sprintf("%s/%s.tsv.gz",indir,cell))) {
+      print(sprintf("Loading %s...",cell))
+      data_list[[cell]] <- fread(sprintf("zcat < %s/%s.tsv.gz",indir,cell), sep="\t", verbose=F, stringsAsFactors=F, showProgress=F) %>% 
+        setnames(c("chr","pos","rate")) %>% .[,sample:=cell] %>% .[,c("start","end"):=list(pos,pos)] %>% 
+        setkey("chr","start","end") %>%
+        foverlaps(annotation, nomatch=0) %>% 
+        # .[, c("i.start","i.end","start","end","chr","strand") := NULL] %>% 
+        .[,dist:=ifelse(strand %in% c("+","*"),pos-TSS,TSS-pos)] %>% 
+        .[,c("sample","id","dist","rate")]
+    }
+  }
+  return(rbindlist(data_list))
+}
+```
+
+```{r define_opts, echo=FALSE, include=FALSE}
+io <- list()
+if (grepl("ricard",Sys.info()['nodename'])) {
+  io$basedir <- "/Users/ricard/data/NMT-seq"
+  io$outdir <- "/Users/ricard/NMT-seq/correlations/local_accrna"
+  io$features.indir <- paste(io$basedir,"features/filt",sep="/")
+} else {
+  io$basedir <- "/hps/nobackup/stegle/users/ricard/NMT-seq"
+  io$outdir <- "/homes/ricard/NOME-seq/correlations/local_accrna"
+  io$features.indir <- paste(io$basedir,"features",sep="/")
+}
+io$in.sample_metadata <- paste0(io$basedir,"/sample_info.txt")
+io$met.indir <- paste(io$basedir,"met/raw/allele_unspecific",sep="/")
+io$dna.indir <- paste(io$basedir,"dna/raw/allele_unspecific",sep="/")
+io$rna.infile <- paste(io$basedir,"rna/parsed/allele_unspecific/sceset.rds",sep="/")
+
+opts <- list()
+# opts$met.min.weight <- 5      # Minimum weight per feature (methylation)
+# opts$dna.min.weight <- 5      # Minimum weight per feature (accessibility)
+# opts$min.coverage   <- 0.4    # minimum coverage per feature across samples (methylation)
+# opts$fraction.sites <- 0.5    # fraction of sites (dna) to keep based on variance
+# opts$min.n          <- 100    # minimum number of features per annotation
+# opts$min.s          <- 20     # minimum number of samples to do the correlation
+# opts$threshold_fdr  <- 0.10   # pvalue threshold for significance in FDR
+# opts$method <- "pearson"      # Correlation type
+# opts$weight <- TRUE           # Weighted correlation? 
+
+opts$all_cells <- fread(io$in.sample_metadata,header=T) %>% .[,sample]
+opts$filt_cells <-  c("A07","A08","A09","B02","C03","C04","C09","D07","D08","E03","F05","F08","G01","G03","G06","H02","H03","H05")
+# opts$filt_cells <-  c("A07","A08","A09")
+
+opts$up <- 4000
+opts$window <- 200
+opts$slide <- 50
+opts$down <- 4000
+```
+
+```{r load_data, echo=FALSE, include=FALSE}
+
+# Load gene metadata
+tmp <- fread(paste0(io$outdir,"/TSS.bed"))[,c(1,2,3,6,4)] %>%
+  setnames(c("chr","start","end","strand","id")) %>%
+  .[,chr:=sub("chr","",chr)] %>%
+  .[,TSS:=start] %>%
+  .[,c("start","end"):=.(start-opts$up,end+opts$down)] %>%
+  setkey(chr,start,end)
+  
+# Load methylation data
+file <- sprintf("%s/met_%d_%d.tsv",io$outdir,opts$up,opts$down)
+if (file.exists(paste0(file,".gz"))) {
+  print("Methylation data found, loading...")
+  met <- fread(sprintf("zcat < %s/met_%d_%d.tsv.gz",io$outdir,opts$up,opts$down))
+} else {
+  print("Methylation data not found, generating...")
+  met <- loadMultipleMetData(io$met.indir, opts$all_cells, tmp)
+  fwrite(met,file,sep="\t")
+}
+met <- met[sample %in% opts$filt_cells]
+
+# Load accessibility data
+file <- sprintf("%s/acc_%d_%d.tsv",io$outdir,opts$up,opts$down)
+if (file.exists(paste0(file,".gz"))) {
+  print("Accessibility data found, loading...")
+  acc <- fread(sprintf("zcat < %s/acc_%d_%d.tsv.gz",io$outdir,opts$up,opts$down))
+} else {
+  print("Accessibility data not found, generating...")
+  acc <- loadMultipleMetData(io$dna.indir, opts$all_cells, tmp)
+  fwrite(acc,file,sep="\t")
+}
+acc <- acc[sample %in% opts$filt_cells]
+
+# Load RNA data
+sceset <- readRDS(file=io$rna.infile)
+rna <- exprs(sceset) %>% t %>% as.data.table(keep.rownames = "sample") %>% 
+  melt(id.vars = "sample", value.name = "expr", variable.name = "gene") %>%
+  merge(fData(sceset) %>% tibble::rownames_to_column("gene") %>% .[,c("gene","ens_id")] %>% setnames("ens_id","id"))
+```
+
+```{r, echo=FALSE}
+accmetrna <- merge(rbind(acc[,context:="GC"], met[,context:="CG"]), 
+                   rna, by=c("sample","id"))
+```
+
+<!-- ```{r general_filter, echo=FALSE} -->
+<!-- # Filter genes with low coverage -->
+<!-- # opts$min_cov <- 15 -->
+<!-- # metrna <- metrna[,cov:=.N,by=c("id","gene","sample")] %>% .[cov>=opts$min_cov] %>% .[,cov:=NULL] -->
+<!-- # accmetrna <- accmetrna[,cov:=.N,by=c("id","gene","sample","context")] %>% .[cov>=opts$min_cov] %>% .[,cov:=NULL] -->
+<!-- ``` -->
+
+
+```{r, echo=FALSE}
+tmp <- seq(from=0-opts$up, to=0+opts$down-opts$window, by=opts$slide)
+foo <- data.table(window_center=tmp+(opts$window/2), rel_start=tmp, rel_end=tmp+opts$window)
+bar <- foverlaps(x=foo %>% setkey(rel_start,rel_end),
+                 y=accmetrna %>% copy %>% .[,c("rel_start","rel_end"):=dist ] %>% setkey(rel_start,rel_end)) %>% 
+  .[,c("i.rel_start","i.rel_end","rel_start","rel_end"):=NULL] %>%
+  .[,.(rate=mean(rate), N=.N),by=c("id","gene","sample","window_center","expr","context")]
+```
+
+
+<!-- ```{r filter_across_samples, echo=FALSE} -->
+<!-- # Filter to compute correlations across samples -->
+<!-- opts$min_cov <- 10 -->
+<!-- metrna <- metrna[,cov:=.N,by=c("id","gene","sample")] %>% .[cov>=opts$min_cov] %>% .[,cov:=NULL] -->
+<!-- ``` -->
+
+
+```{r cor, echo=FALSE}
+
+# Correlation across samples
+# (WE HAVE TO APPLY MANY FITLERS TO DO THIS)
+# cor <- bar %>% .[,.(r_dnarna=cor(x=rate, y=expr, method="pearson", use="pairwise.complete.obs")), by=c("window_center","id")]
+
+# Correlation across genes
+cor <- bar %>% .[,.(r=cor(x=rate, y=expr, method="pearson", use="pairwise.complete.obs")), by=c("window_center","sample","context")]
+```
+
+```{r corplot, echo=FALSE}
+mean_sd <- function(x) { return(data.frame(y=mean(x), ymin=mean(x)-sd(x), ymax=mean(x)+sd(x))) }
+p <- ggplot(cor,aes(x=window_center, y=r)) +
+  stat_summary(aes(group=context, color=context, fill=context), fun.data=mean_sd, geom="smooth", alpha=0.2, size=1.0) +
+  geom_hline(yintercept=0, linetype="dashed", color="black", size=0.5) +
+  geom_vline(xintercept=0, linetype="dashed", color="black", size=0.5) +
+  # geom_segment(x=-opts$up, xend=opts$down, y=0, yend=0, color="black", size=0.5,  linetype="dashed") +
+  ylab("Correlation") + xlab("Genomic distance from TSS (bp)") +
+  scale_x_continuous(limits=c(-opts$up,opts$down)) +
+  scale_y_continuous(limits=c(-0.35,0.35), breaks=c(-0.3,0,0.3), expand=c(0,0)) +
+  scale_colour_discrete(labels=c("CG methylation", "GC accessibility")) +
+  scale_fill_discrete(guide=FALSE) +
+  theme(
+    plot.title = element_blank(),
+    axis.text.x = element_text(size=16,colour="black"),
+    axis.text.y = element_text(size=16, colour="black"),
+    axis.title.x = element_text(size=19, margin=margin(10,0,0,0)),
+    axis.title.y = element_text(size=19, margin=margin(0,10,0,0)),
+    axis.line = element_line(size=rel(1.0)),
+    axis.ticks.x = element_line(size=rel(1.1), color="black"),
+    axis.ticks.y = element_line(size=rel(1.1), color="black"),
+    legend.key = element_blank(),
+    legend.position = "top",
+    # legend.position = c(0.5,1.0),
+    legend.direction = "horizontal",
+    legend.key.width = unit(2.0,"line"),
+    legend.key.height = unit(2.0,"line"),
+    legend.margin = margin(t=10, r=0, b=0, l=0, unit="pt"),
+    legend.title = element_blank(),
+    legend.text = element_text(size=16),
+    panel.border = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank()
+  )
+p
+
+pdf(file="out/local_cor.pdf")
+print(p)
+dev.off()
+```
+
+<!-- ```{r zoom_corplot, echo=FALSE} -->
+
+<!-- p <- ggplot(cor[window_center>=-500 & window_center<=500 & context=="GC"], aes(x=window_center, y=r)) + -->
+<!--   stat_summary(fun.data=mean_sd, geom="smooth", color="#00BFC4", fill="#00BFC4", alpha=0.2, size=1.0) + -->
+<!--   # geom_hline(yintercept=0, linetype="dashed", color="black", size=0.5) + -->
+<!--   geom_vline(xintercept=0, linetype="dashed", color="black", size=0.5) + -->
+<!--   # geom_segment(x=-opts$up, xend=opts$down, y=0, yend=0, color="black", size=0.5,  linetype="dashed") + -->
+<!--   ylab("Correlation") + xlab("") + -->
+<!--   # scale_x_continuous(limits=c(-500,500)) + -->
+<!--   scale_y_continuous(limits=c(0,0.31), expand=c(0,0)) + -->
+<!--   # scale_colour_discrete(labels=c("CG methylation", "GC accessibility")) + -->
+<!--   # scale_fill_discrete(guide=FALSE) +q  -->
+<!--   theme( -->
+<!--     plot.title = element_blank(), -->
+<!--     axis.text.x = element_text(size=12,colour="black"), -->
+<!--     axis.text.y = element_text(size=12, colour="black"), -->
+<!--     axis.title.x = element_blank(), -->
+<!--     axis.title.y = element_text(size=13, margin=margin(0,10,0,0)), -->
+<!--     axis.line = element_line(size=rel(1.0)), -->
+<!--     axis.ticks.x = element_line(size=rel(1.1), color="black"), -->
+<!--     axis.ticks.y = element_line(size=rel(1.1), color="black"), -->
+<!--     legend.key = element_blank(), -->
+<!--     legend.position = "top", -->
+<!--     # legend.position = c(0.5,1.0), -->
+<!--     legend.direction = "horizontal", -->
+<!--     legend.key.width = unit(2.0,"line"), -->
+<!--     legend.key.height = unit(2.0,"line"), -->
+<!--     legend.margin = margin(t=10, r=0, b=0, l=0, unit="pt"), -->
+<!--     legend.title = element_blank(), -->
+<!--     legend.text = element_text(size=12), -->
+<!--     panel.border = element_blank(), -->
+<!--     panel.grid.major = element_blank(), -->
+<!--     panel.grid.minor = element_blank(), -->
+<!--     panel.background = element_blank() -->
+<!--   ) -->
+<!-- print(p) -->
+
+<!-- # pdf(file=io$plot.outfile, width=5, height=5) -->
+<!-- # print(p) -->
+<!-- # dev.off() -->
+<!-- ``` -->
+

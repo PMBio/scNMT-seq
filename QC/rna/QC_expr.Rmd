@@ -1,0 +1,113 @@
+---
+title: "NMT-seq processing and analysis: Quality control on expression data"
+author: "Ricard Argelaguet and Stephen Clark"
+output: 
+  BiocStyle::html_document: 
+    fig_width: 10
+    fig_height: 8
+---
+
+```{r load_modules, echo=FALSE, include=FALSE}
+library(data.table)
+library(purrr)
+library(scater)
+library(ggplot2)
+```
+
+```{r define_opts, echo=FALSE, include=FALSE}
+
+## I/O ##
+io <- list()
+io$in.file <- "/Users/ricard/data/NMT-seq/rna/parsed/allele_unspecific/sceset_all.rds"
+# io$in.file <- "/Users/ricard/data/NMT-seq/rna/parsed/allele_unspecific/sceset_merged_all.rds"
+
+# Options
+opts <- list()
+opts$remove_2i <- FALSE  # Remove 2i cells?
+opts$remove_MT <- FALSE  # Remove MT control cells?
+```
+
+```{r load_data, echo=FALSE, include=FALSE}
+sce <- readRDS(io$in.file)
+
+if (opts$remove_2i)
+  sce <- sce[,sce$culture != "2i"]
+
+if (opts$remove_MT)
+  sce <- sce[,sce$type != "MT"]
+```
+
+## Library size
+```{r coverage}
+plotPhenoData(sce, aesth=aes_string(x="culture", y ="total_counts", color="culture"))
+plotPhenoData(sce, aesth=aes_string(x="type", y ="total_counts", color="type"))
+```
+
+## t-SNE
+```{r tsne, echo=FALSE, include=TRUE}
+plotTSNE(sce, colour_by="culture", shape_by="dataset")
+# plotTSNE(sce)
+```
+
+## Principal Component Analysis
+```{r echo=FALSE, include=TRUE}
+plotPCA(sce, colour_by="culture", shape_by="dataset")
+# plotPCA(sce)
+```
+
+## Top expressed genes
+```{r echo=FALSE, include=TRUE}
+plotQC(sce, type="highest-expression", n=10)
+```
+
+## Differential expression
+```{r}
+```
+
+## Heatmap
+```{r heatmap, echo=FALSE}
+sample_df <- data.frame(
+  sample=colnames(sce),
+  # type=sce$type,
+  dataset=sce$dataset,
+  culture=sce$culture
+) %>% tibble::column_to_rownames("sample")
+
+hvg <- names(tail(sort(apply(exprs(sce),1,var)), n=3000))
+# sce_filt <- sce[fData(sce)$pct_dropout<50,]
+sce_filt <- sce[hvg,]
+
+pheatmap::pheatmap(exprs(sce_filt), border_color="black", main="",
+         cluster_cols=T, cluster_rows=T, show_rownames=FALSE, show_colnames=FALSE,
+         annotation_row=NA, annotation_col=sample_df, annotation_colors=NA)
+         # kmeans_k=1000)
+```
+
+### Violin plots
+```{r}
+# Reference: (1) The Transcriptional and Epigenomic Foundations of Ground State Pluripotency
+
+genes <- c("Pou5f1")
+plotExpression(sce, genes, x="culture", colour_by="culture")
+
+
+# Traditional markers of pluripotency
+genes <- c("Nanog","Dppa3","Zfp42","Klf4")
+plotExpression(sce, genes, x="culture", colour_by="dataset")
+
+# Genes upregulated in 2i according to (1)
+higher_2i1 <- c("Eif4a2","Npc2","Acox3","Mt1")
+plotExpression(sce, higher_2i1, x="culture", colour_by="culture", show_median=TRUE)
+higher_2i2 <- c("Tcl1","Cox6b2","Ift52","Caprin2")
+plotExpression(sce, higher_2i2, x="culture", colour_by="culture", show_median=TRUE)
+higher_2i3 <- c("Ppic","Mt2","Aim2","Apobec2")
+plotExpression(sce, higher_2i3, x="culture", colour_by="culture", show_median=TRUE)
+
+# Genes upregulated in serum according to (1)
+higher_serum1 <- c("Actn4","Jarid2","Slc2a1","Ccne1")
+plotExpression(sce, higher_serum1, x="culture", colour_by="culture", show_median=TRUE)
+higher_serum2 <- c("Arid1a","Prpf8","Glul","Hdlbp")
+plotExpression(sce, higher_serum2, x="culture", colour_by="culture", show_median=TRUE)
+higher_serum3 <- c("Myc","Id1","Id2","Id3")
+plotExpression(sce, higher_serum3, x="culture", colour_by="dataset", show_median=TRUE)
+```

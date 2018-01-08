@@ -1,0 +1,322 @@
+---
+title: "NMT-seq: profiles of methylation and accessibility"
+output: 
+  BiocStyle::html_document: 
+    fig_width: 10
+    fig_height: 8
+---
+
+```{r load_modules, echo=FALSE, include=FALSE}
+library(data.table)
+library(purrr)
+library(ggplot2)
+```
+
+```{r fncs, echo=FALSE}
+loadMultipleMetData <- function(files, context) {
+  data <- files %>% map(~ fread(sprintf("zcat < %s",.x), sep="\t", verbose=F, stringsAsFactors=F, showProgress=F))
+  names(data) <- opts$cells
+  list(data,names(data)) %>% pwalk(~.x[,sample:=.y])
+  data <- rbindlist(data)
+  colnames(data) <- c("chr","pos","rate","sample")
+  return(data)
+}
+
+theme_boxplot <- function() {
+    theme(
+      plot.margin = unit(c(t=1,r=1,b=1,l=1), "cm"),
+      plot.title = element_text(size=25,hjust=0.5),
+      axis.text=element_text(size=15, colour="black"),
+      axis.title.x=element_text(size=17, margin=margin(10,0,0,0)),
+      axis.title.y=element_text(size=17, margin=margin(0,10,0,0)),
+      axis.line = element_line(size=rel(1.0)),
+      axis.ticks = element_line(size=rel(1.3), color="black"),
+      legend.key = element_blank(),
+      legend.position = "top",
+      legend.direction = "horizontal",
+      # legend.key.size= unit(0.5, "cm"),
+      legend.key.width=unit(1.2,"line"),
+      legend.key.height=unit(1.0,"line"),
+      legend.margin = margin(t=10, r=0, b=0, l=0, unit="pt"),
+      legend.title = element_blank(),
+      legend.text = element_text(size=15),
+      panel.border=element_blank(),
+      panel.grid.major=element_blank(),
+      panel.grid.minor=element_blank(),
+      panel.background=element_blank()
+    )
+}
+
+```
+
+
+```{r define_options, echo=FALSE}
+
+# Define I/O
+io <- list()
+if (grepl("ricard",Sys.info()['nodename'])) {
+  io$basedir <- "/Users/ricard/data/NMT-seq"
+  io$outdir <- "/Users/ricard/NMT-seq/profiles/metacc/out"
+}
+io$in.sample_metadata <- paste0(io$basedir,"/sample_info_all.txt")
+io$features.indir <- paste(io$basedir,"features/filt",sep="/")
+io$met.indir <- paste(io$basedir,"met/raw/filtered/unstranded/binarised/",sep="/")
+io$acc.indir <- paste(io$basedir,"acc/raw/filtered/unstranded/binarised/",sep="/")
+
+# Define options
+opts <- list()
+opts$window_size <- 1500
+opts$met.tile <- 50
+opts$acc.tile <- 25 
+
+# Define which cells to use (ideally they should have similar mean methylation rate)
+# opts$cells <- fread(io$in.sample_metadata) %>% .[pass_metQC==T & pass_accQC==T & culture=="Serum" ,sample]
+# opts$cells <- fread(io$in.sample_metadata) %>% .[pass_metQC==T & type=="MT" & culture=="Serum" ,sample]
+opts$cells <- c("A07","A08","A09","B02","C03","C04","C09","D07","D08","E03","F05","F08","G01","G03","G06","H02","H03","H05")
+# opts$cells <- c("A07","A08","A09","B12","C12","D12")
+
+# Define which annotations to use and where to center the windows
+opts$annotations <- c(
+  # "H3K27ac_Creyghton"="center",
+  # "H3K27ac_ENCODE"="center"
+  # "H3K27me3_Creyghton"="center",
+  # "H3K27me3_ENCODE"="center"
+  # "H3K4me1_Creyghton"="center",
+  # "H3K4me1_ENCODE"="center"
+  # "H3K4me3_Creyghton"="center",
+  # "H3K4me3_ENCODE"="center"
+  # "ActiveEnhancers_Creyghton"="center",
+  # "ActiveEnhancers_ENCODE"="center"
+  "prom_2000_2000"="center",
+  # "prom_2000_2000_cgi"="center",
+  # "prom_2000_2000_noncgi"="center",
+  # "prom_2000_2000_active"="center",
+  # "prom_2000_2000_inactive"="center",
+  # "prom_2000_2000_poised"="center",
+  # "active_enhancers"="center",
+  "super_enhancers"="center",
+  # "primed_enhancers"="center",
+  "CTCF"="center",
+  # "p300"="center",
+  "Nanog"="center",
+  "Oct4"="center"
+  # "DHS"="center"
+)
+
+```
+
+```{r print_opts, echo=FALSE}
+# cat(sprintf("- Cells: %s\n",paste(opts$cells,collapse=" ")))
+# cat(sprintf("- Window size: %d\n",opts$window_size))
+# cat(sprintf("- Tile: %d\n",opts$tile))
+```
+
+<!-- Load sample metadata -->
+```{r}
+sample_metadata <- fread(io$in.sample_metadata) %>% .[sample%in%opts$cells]
+```
+
+<!-- Load genomic annotations -->
+```{r load_annotations, echo=FALSE, warning=FALSE}
+anno_list <- list()
+for (anno in names(opts$annotations)) {
+  tmp <- fread(sprintf("%s/%s.bed",io$features.indir,anno))[,c(1,2,3,4,5,6)]
+  colnames(tmp) <- c("chr","start","end","strand","id","anno")
+  
+  # Define central position for the window approach
+  if (opts$annotations[anno] == "start") {
+    tmp <- rbind(tmp[strand=="+",.(chr,start,strand,id,anno)] %>% .[,center:=start] %>% .[,c("start"):=NULL], 
+                 tmp[strand=="-",.(chr,end,strand,id,anno)] %>% .[,center:=end] %>% .[,c("end"):=NULL]) 
+  }
+  if (opts$annotations[anno] == "center") {
+    stopifnot(all(tmp[,end] > tmp[,start]))
+    tmp <- tmp[,.(chr,start,end,strand,id,anno)][,center:=round(end+start)/2][,c("start","end"):=NULL]
+  }
+  if (opts$annotations[anno] == "end") {
+    tmp <- rbind(tmp[strand=="+",.(chr,end,strand,id,anno)][,center:=end][,c("end"):=NULL], 
+                 tmp[strand=="-",.(chr,start,strand,id,anno)][,center:=start][,c("start"):=NULL])
+  }
+  anno_list[[anno]] <- tmp %>% .[, c("start","end") := list(center-opts$window_size,center+opts$window_size)]
+}
+
+anno_df <- rbindlist(anno_list) %>% 
+  .[,c("anno","chr"):=list(as.factor(anno),as.factor(sub("chr","",chr)))] %>%
+  setkey(chr,start,end)
+rm(anno_list)
+```
+
+<!-- Load methylation and accessibility data -->
+```{r load_data, echo=FALSE}
+# met <- loadMultipleMetData(paste0(io$met.indir,opts$cells,".tsv.gz"), context="CG") %>% .[,c("start","end","context") := list(pos,pos,"CG")] %>% setnames("pos","bp")
+# acc <- loadMultipleMetData(paste0(io$acc.indir,opts$cells,".tsv.gz"), context="GC") %>% .[,c("start","end","context") := list(pos,pos,"GC")] %>% setnames("pos","bp")
+
+met_list <- list()
+for (cell in opts$cells) {
+  tmp <- fread(sprintf("zcat < %s/%s.tsv.gz",io$met.indir,cell), showProgress=F) %>% setnames(c("chr","pos","rate")) %>% .[,sample:=cell] %>% .[,context:="CG"] %>%
+    .[,c("start","end"):=list(pos,pos)] %>% setnames("pos","bp") %>% setkey("chr","start","end") %>%
+    foverlaps(.,anno_df, nomatch=0) %>% .[, c("chr","i.start","i.end") := NULL] %>%
+    .[,dist:=ifelse(strand %in% c("+","*"),bp-center,center-bp)] %>% 
+    .[, dist:=opts$met.tile*round(dist/opts$met.tile)] %>%
+    .[,list(rate=mean(rate), n=.N),by=.(sample,id,dist,anno)]
+  met_list[[cell]] <- tmp
+}
+met <- rbindlist(met_list) %>% .[,context:="CG"]
+
+
+acc_list <- list()
+for (cell in opts$cells) {
+  tmp <- fread(sprintf("zcat < %s/%s.tsv.gz",io$acc.indir,cell), showProgress=F) %>% setnames(c("chr","pos","rate")) %>% .[,sample:=cell] %>%
+    .[,c("start","end"):=list(pos,pos)] %>% setnames("pos","bp") %>% setkey("chr","start","end") %>%
+    foverlaps(.,anno_df, nomatch=0) %>% .[, c("chr","i.start","i.end") := NULL] %>%
+    .[,dist:=ifelse(strand %in% c("+","*"),bp-center,center-bp)] %>% 
+    .[, dist:=opts$acc.tile*round(dist/opts$acc.tile)] %>%
+    .[,list(rate=mean(rate), n=.N),by=.(sample,id,dist,anno)]
+  acc_list[[cell]] <- tmp
+}
+acc <- rbindlist(acc_list) %>% .[,context:="GC"]
+
+# Combine met and acc into one object and remove old data to free some space
+data <- rbind(met,acc) %>% setkey(anno); rm(acc,met)
+```
+
+<!-- Pseudobulk data -->
+```{r}
+to.plot <- data %>%
+  .[,list(mean=mean(rate)), by=c("sample","dist","anno","context")] %>%
+  setkey(anno)
+```
+
+<!-- Merge with sample metadata -->
+```{r}
+to.plot <- to.plot %>% merge(sample_metadata[,c("sample","type")],by="sample") %>% setnames("type","method") %>% setkey(anno)
+```
+
+<!-- Rename annotations -->
+```{r rename, echo=FALSE, include=FALSE, warning=FALSE}
+# Rename annotations
+# anno_names <- c(
+#   "prom_2000_2000_cgi"="CGI promoters",
+#   "prom_2000_2000_noncgi"="non-CGI promoters",
+#   "prom_2000_2000_active"="Active promoters",
+#   "prom_2000_2000_inactive"="Inactive promoters",
+#   "prom_2000_2000_poised"="Poised promoters","prom$"="Promoters",
+#   "active_enhancers"="Active enhancers",
+#   "super_enhancers"="Super enhancers",
+#   "primed_enhancers"="Primed enhancers"
+# )
+# to.plot$anno <- stringr::str_replace_all(to.plot$anno,anno_names)
+# setkey(to.plot,anno)
+```
+
+
+<!-- Plot pseudobulked methylation and accessibility profiles -->
+```{r plot_profiles, echo=FALSE, include=TRUE, warning=FALSE}
+f <- function(x) { return(data.frame(y=mean(x), ymin=mean(x)-sd(x), ymax=mean(x)+sd(x))) }
+
+# annos <- c("CTCF","Nanog","DHS","Oct4","Active enhancers", "Super enhancers")
+p_list <- list()
+for (n in unique(data$anno)) {
+# for (n in annos) {
+  p <- ggplot(to.plot[n], aes(x=dist, y=mean)) +
+    stat_summary(aes(group=context, colour=context, fill=context), fun.data=f, geom="smooth") +
+    # stat_summary(aes(group=context, colour=context, fill=context), fun.y=mean, geom="line") +
+    ggtitle(n) + xlab("Genomic distance from TSS") + ylab("Methylation/Accessibility rate") +
+    xlim(-opts$window_size, opts$window_size) + ylim(20,70) +
+    scale_linetype_manual(values=c("CG"="solid", "GC"="solid")) +
+    scale_colour_manual(values=c("CG"="#F8766D","GC"="#00BFC4"), labels=c("CpG methylation","GpC accessibility")) +
+    guides(fill=FALSE, linetype=FALSE) +
+    theme_boxplot()
+  print(p)
+  p_list[[n]] <- p
+}
+
+# pp <- cowplot::plot_grid(p_list[[1]],p_list[[2]],p_list[[3]],p_list[[4]], ncol=2, nrow=2)
+# pdf(file=paste0(io$outdir,"/out.pdf"), width=18, height=12, useDingbats=F)
+# print(pp)
+# dev.off()
+```
+
+<!-- Plot methylation and accessibility profiles in single cells -->
+```{r plot_profiles, echo=FALSE, include=TRUE, warning=FALSE}
+f <- function(x) { return(data.frame(y=mean(x), ymin=mean(x)-sd(x), ymax=mean(x)+sd(x))) }
+
+annos <- c("CTCF")
+p_list <- list()
+# for (n in unique(data$anno)) {
+for (n in annos) {
+  p_list[[n]] <- list()
+  for (i in unique(data$sample)) {
+    p <- ggplot(to.plot[sample==i & anno==n], aes(x=dist, y=mean)) +
+      stat_summary(aes(group=context, colour=context, fill=context), fun.data=f, geom="smooth") +
+      # stat_summary(aes(group=context, colour=context, fill=context), fun.y=mean, geom="line") +
+      ggtitle(paste0(n,": ","Cell ",i)) + xlab("Distance from center of region (bp)") + ylab("Rate") +
+      xlim(-opts$window_size, opts$window_size) + ylim(20,70) +
+      scale_linetype_manual(values=c("CG"="solid", "GC"="solid")) +
+      scale_colour_manual(values=c("CG"="#F8766D","GC"="#00BFC4"), labels=c("CpG methylation","GpC accessibility")) +
+      guides(fill=FALSE, linetype=FALSE) +
+      theme_boxplot() +
+      theme(
+        plot.title = element_text(size=15,hjust=0.5),
+        axis.text=element_text(size=12, colour="black"),
+        axis.title.x=element_text(size=13, margin=margin(10,0,0,0)),
+        axis.title.y=element_text(size=13, margin=margin(0,10,0,0)),
+        axis.line = element_line(size=rel(1.0)),
+        axis.ticks = element_line(size=rel(1.3), color="black"),
+        legend.text = element_text(size=11)
+      )
+    # print(p)
+    p_list[[n]][[i]] <- p
+    
+  }
+}
+
+pp <- cowplot::plot_grid(
+  p_list[["CTCF"]][["A07"]],
+  p_list[["CTCF"]][["A08"]],
+  p_list[["CTCF"]][["A09"]],
+  p_list[["CTCF"]][["B02"]],
+  p_list[["CTCF"]][["C03"]],
+  p_list[["CTCF"]][["C04"]],
+  p_list[["CTCF"]][["C09"]],
+  p_list[["CTCF"]][["D07"]],
+  p_list[["CTCF"]][["D08"]], ncol=3, nrow=3)
+
+pdf(file=paste0(io$outdir,"/out.pdf"), width=12, height=12, useDingbats=F)
+print(pp)
+dev.off()
+```
+
+
+
+
+
+
+
+IGNORE BELOW
+
+<!-- Compare MT vs NMT cells -->
+```{r}
+f <- function(x) { return(data.frame(y=mean(x), ymin=mean(x)-sd(x), ymax=mean(x)+sd(x))) }
+
+p_list <- list()
+for (n in unique(data$anno)) {
+  p <- ggplot(to.plot[n], aes(x=dist, y=mean)) +
+    stat_summary(aes(group=interaction(context,method), colour=context, fill=context, linetype=method), fun.data=f, geom="smooth") +
+    # stat_summary(aes(group=context, colour=context, fill=context), fun.y=mean, geom="line") +
+    ggtitle(n) + xlab("Distance from center of region (bp)") + ylab("Rate") +
+    xlim(-opts$window_size, opts$window_size) +
+    scale_linetype_manual(values=c("NMT"="solid", "MT"="longdash")) +
+    scale_colour_manual(values=c("CG"="#F8766D","GC"="#00BFC4"), labels=c("CpG methylation","GpC accessibility")) +
+    guides(fill=FALSE) +
+    theme_boxplot()
+  # print(p)
+  p_list[[n]] <- p
+}
+
+pp <- cowplot::plot_grid(p_list[["CTCF"]],p_list[["Nanog"]],p_list[["Oct4"]],p_list[["super_enhancers"]], ncol=2, nrow=2)
+pdf(file=paste0(io$outdir,"/out.pdf"), width=12, height=12, useDingbats=F)
+print(pp)
+dev.off()
+```
+
+

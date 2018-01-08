@@ -1,0 +1,129 @@
+---
+title: "scMT: dimensionality reduction on expression data"
+author: "Ricard Argelaguet"
+output: 
+  BiocStyle::html_document: 
+  fig_width: 10
+  fig_height: 8
+---
+  
+```{r load_modules, echo=FALSE, include=FALSE}
+library(data.table)
+library(purrr)
+library(scater)
+library(ggplot2)
+```
+
+```{r funcs, echo=FALSE}
+matrix.please<-function(x) {
+    m<-as.matrix(x[,-1])
+    rownames(m)<-x[[1]]
+    m
+}
+
+scatter_theme <- function() {
+  p <- theme(
+    plot.title = element_text(size=20, hjust=0.5),
+    axis.title.y = element_text(colour="black", size=20, margin=margin(0,15,0,0)),
+    axis.title.x = element_text(colour="black", size=20, margin=margin(15,0,0,0)),
+    axis.text.x = element_text(colour="black",size=rel(1.6)),
+    axis.text.y = element_text(colour="black",size=rel(1.6)),
+    axis.line = element_line(colour="black", size=rel(0.9)),
+    axis.ticks = element_line(colour="black", size=rel(1.0)),
+    panel.background = element_blank(),
+    panel.grid = element_blank(),
+    legend.position="right",
+    legend.text=element_text(size=15),
+    legend.key = element_blank(),
+    legend.title=element_text(size=17),
+    legend.background=element_blank(),
+    panel.border = element_blank()
+  )
+}
+```
+
+
+```{r define_opts, echo=FALSE}
+
+## Define I/O ##
+io <- list()
+io$expr <- "/Users/ricard/data/NMT-seq/rna/parsed/allele_unspecific/sceset.rds"
+io$metadata.file <- "/Users/ricard/data/NMT-seq/sample_info.txt"
+io$outdir <- "/Users/ricard/NMT-seq/dimensionality_reduction/out"
+
+## Define options ##
+opts <- list()
+
+# Define which cells to use
+opts$cells <- fread(io$metadata.file) %>% .[pass_rnaQC==T, sample]
+```
+
+```{r load_data, echo=FALSE}
+
+# Load sample metadata
+sample_metadata <- fread(io$metadata.file) %>% .[sample %in% opts$cells]
+
+# Load expression data and convert to data.table
+sce <- readRDS(io$expr)
+sce_filt <- sce[,opts$cells]
+rna <- exprs(sce_filt) %>% t %>% as.data.table(keep.rownames = "sample") %>%
+  melt(id.vars = "sample", value.name = "expr", variable.name = "gene") %>%
+  merge(fData(sce_filt) %>% tibble::rownames_to_column("gene") %>% .[,c("gene","ens_id")] %>% setnames("ens_id","id")) %>%
+  merge(sample_metadata, by="sample")
+
+# Convert to matrtix
+rna_matrix <- rna[,c("sample","gene","expr")] %>% dcast(sample~gene, value.var="expr") %>% matrix.please
+```
+
+
+## Correlation plot
+```{r, fig.height=5, fig.width=8}
+r <- cor(exprs(sce_filt))
+pheatmap::pheatmap(r, border_color="black", main="",
+         cluster_cols=T, cluster_rows=T, show_rownames=T, show_colnames=FALSE,
+         annotation_row=NA, annotation_col=NA, annotation_colors=NA)
+```
+
+## t-SNE
+```{r tsne, echo=FALSE, fig.height=2.5, fig.width=2.5}
+
+## Using scater  ##
+plotTSNE(sce_filt, ntop = 1000, shape_by="culture", colour_by="culture")
+
+## Manual ##
+
+# Select top n more variable genes
+keep_variable <- 1000
+rna_matrix_filt <- rna_matrix[,names(tail(sort(apply(rna_matrix,2,var)), n=keep_variable))]
+
+# Perform t-SNE
+# tsne <- tsne::tsne(rna_matrix_filt) # Slow
+tsne <- Rtsne::Rtsne(rna_matrix_filt, check_duplicates=FALSE, pca=TRUE, perplexity=floor(ncol(rna_matrix_filt)/5), theta=0.5, dims=2)
+
+to.plot <- tsne$Y %>% as.data.table %>% .[,sample:=rownames(rna_matrix_filt)] %>%
+    merge(sample_metadata,by="sample")
+
+# pdf(paste0(io$outdir,"/tsne.pdf"))
+ggplot(to.plot, aes(x=V1,y=V2)) +
+  geom_point(aes(color=culture,shape=culture), alpha=0.7) +
+  labs(x="t-SNE Dimension 1", y="t-SNE Dimension 2") +
+  scatter_theme() +
+  guides(colour = guide_legend(override.aes = list(size=3)),
+         shape = guide_legend(override.aes = list(size=3)))
+# dev.off()
+
+# pdf(paste0(io$outdir,"/tsne_meth.pdf"))
+# ggplot(to.plot, aes(x=V1,y=V2)) +
+#   geom_point(aes(color=stage,shape=Methylation), alpha=0.7) +
+#   labs(x="t-SNE Dimension 1", y="t-SNE Dimension 2") +
+#   scale_shape_manual(values = c(1,16)) +
+#   scatter_theme() +
+#   guides(colour = guide_legend(override.aes = list(size=3)),
+#          shape = guide_legend(override.aes = list(size=3)))
+# dev.off()
+```
+
+## Principal Component Analysis
+```{r echo=FALSE, include=TRUE}
+plotPCA(sce_filt, shape_by="culture", colour_by="culture")
+```

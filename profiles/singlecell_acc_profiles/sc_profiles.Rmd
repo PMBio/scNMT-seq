@@ -1,0 +1,90 @@
+---
+title: "NMT-Seq: Single-cell accessibility profiles"
+output: 
+  BiocStyle::html_document: 
+    fig_width: 12
+    fig_height: 8
+---
+
+```{r echo=FALSE, include=FALSE}
+# devtools::install_github("andreaskapou/BPRMeth-devel")
+suppressPackageStartupMessages(library(scater))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(BPRMeth))
+suppressPackageStartupMessages(library(data.table))
+```
+
+```{r echo=FALSE, include=FALSE}
+# Function for plotting BPR profiles
+plot_bpr_profiles <- function(region, X, fit_prof, thresh = 0.9,
+                              title = "Gene promoter", up_label = "-500bp",
+                              down_label = "+500bp", middle_label = "TSS", ...){
+  #graphics::par(cex=1.05, mai=c(0.87, 0.85, .7, .3) )
+  xs <- seq(from = -1, to = 1, by = 0.01)
+  graphics::plot(X[[region]][, 1], X[[region]][, 2], col = "blue2", pch = 21, ylim = c(0,1),
+                 xlim = c(-1,1), lwd = 0.8, xlab = NA, ylab = NA,
+                 cex.axis = 1.4, xaxt = "n")
+  #graphics::mtext(side = 1, "genomic region", line = 3, cex = 1.2)
+  #graphics::mtext(side = 2, "GC accessibility", line = 3, cex = 1.2)
+  graphics::axis(side = 1, at = c(-1, 0, 1), labels=c(up_label, middle_label, down_label), cex.axis = 1.4)
+  graphics::title(main=title, line = 1, cex.main=1.8)
+  graphics::lines(x = xs, y = eval_probit_function(fit_prof$basis, xs, fit_prof$W_opt[region, 1:(fit_prof$basis$M + 1)]), col = "red2", lwd = 2)
+}
+```
+
+# Learn GC accessibility profiles using BPRMeth model
+```{r dnarna_bprfit, echo=FALSE, include=TRUE, warning=FALSE, fig.align='center', fig.width=13, fig.height=7}
+# Number of basis functions
+basis_prof <- create_rbf_object(M = 30)
+# Individual cells to plot
+cell_ind <- c("B01", "F06", "G02", "E02")
+# Load 1kb promoter region data
+base_dir <- "/home/cakapourani/Documents/Code/nmt-seq/profiles/acc-profiles/"
+load(paste0(base_dir,"data/dna_data_1k_prom.RData"))
+rm(io, opts)
+# Extract Sox8 and Helb genes
+gene_chpf <- lapply(cell_dna_regions, "[[", "ENSMUSG00000032997")
+gene_helb <- lapply(cell_dna_regions, "[[", "ENSMUSG00000020228")
+gene_cth  <- lapply(cell_dna_regions, "[[", "ENSMUSG00000028179")
+
+# Keep only 4 cells
+chpf_cells <- c("C03", "F04", "C09", "B01")
+helb_cells <- c("F02", "C03", "F07", "H07")
+cth_cells  <- c("B02", "A04", "C06", "H07")
+gene_chpf <- gene_chpf[chpf_cells]
+gene_helb <- gene_helb[helb_cells]
+gene_cth <- gene_cth[cth_cells]
+
+# ------------------------
+# Learn methylation profiles
+set.seed(12345)
+prof_chpf <- bpr_optim(x = gene_chpf, basis = basis_prof, lambda = 1/6, fit_feature = NULL, cpg_dens_feat = FALSE, opt_itnmax = 50)
+prof_helb <- bpr_optim(x = gene_helb, basis = basis_prof, lambda = 1/6, fit_feature = NULL, cpg_dens_feat = FALSE, opt_itnmax = 50)
+prof_cth  <- bpr_optim(x = gene_cth,  basis = basis_prof, lambda = 1/6, fit_feature = NULL, cpg_dens_feat = FALSE, opt_itnmax = 50)
+
+pdf(file = paste0(base_dir, "out/sc_acc_profiles.pdf"), width = 12, height = 7)
+par(mfrow=c(2,2), cex=0.9, mai=c(0.8,0.4,.4,.7), oma=c(0,4,2,0))
+for (t in 1:4){
+  plot_bpr_profiles(region = t, X = gene_chpf, fit_prof = prof_chpf, title = paste0("Cell ", chpf_cells[t]), 
+                    up_label = "-500bp", down_label = "+500bp", middle_label = "TSS")
+}
+title( "Gene Chpf", outer = TRUE, cex.main = 2.2)
+graphics::mtext("GC accessibility", outer = TRUE, side = 2, line = 2, cex = 1.8)
+
+par(mfrow=c(2,2), cex=0.9, mai=c(0.8,0.4,.4,.7), oma=c(0,4,2,0))
+for (t in 1:4){
+  plot_bpr_profiles(region = t, X = gene_helb, fit_prof = prof_helb, title = paste0("Cell ", helb_cells[t]), 
+                    up_label = "-500bp", down_label = "+500bp", middle_label = "TSS")
+}
+title( "Gene Helb", outer = TRUE, cex.main = 2.2)
+graphics::mtext("GC accessibility", outer = TRUE, side = 2, line = 2, cex = 1.8)
+
+par(mfrow=c(2,2), cex=0.9, mai=c(0.8,0.4,.4,.7), oma=c(0,4,2,0))
+for (t in 1:4){
+  plot_bpr_profiles(region = t, X = gene_cth, fit_prof = prof_cth, title = paste0("Cell ", cth_cells[t]), 
+                    up_label = "-500bp", down_label = "+500bp", middle_label = "TSS")
+}
+title( "Gene Cth", outer = TRUE, cex.main = 2.2)
+graphics::mtext("GC accessibility", outer = TRUE, side = 2, line = 2, cex = 1.8)
+dev.off()
+```
