@@ -1,0 +1,127 @@
+---
+title: "Quality control of CpG methylation data: comparison to published data"
+author: "Stephen Clark"
+output: html_document
+---
+This script performs principal compenents analysis on gene body methylation data from scNMTseq ES cells together with Serum grown and 2i grown ES cells from previous studies: scM&T-seq (Angermueller 2016) and scBS-seq (Smallwood 2014) as well as bulk BS-seq (Ficz 2013).
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(data.table)
+library(purrr)
+library(tidyr)
+library(ggplot2)
+library(cowplot)
+
+
+
+# input / output
+
+io = list(mm10 = "data/feat/ricard/genebody.bed",              # gene body annotation for mm10 genome
+          mm9 = "data/ensembl/mouse/mm9/mRNA/mm9genes.txt",    # gene body annotation for mm9 genome
+          nmt = "data/quant/cg/genebody.csv",                  # gene body methylation data
+          mt = "data/MnTseq/MnT_genes.rds",                    # gene body methylation data for Angermueller 2016
+          scbs = "data/scBS/scBS_genes.rds",                   # gene body methylation data for Smallwood 2014
+          bulk = "data/bulk/genes.csv",                        # gene body methylation data for Ficz 2013
+          qc = "data/sample_info.csv"                          # QC information for all datasets
+          )  
+
+
+```
+
+```{r functions}
+load_anno = function(file, select = 1:4){
+  fread(file, select = select) %>% 
+    setnames(c("chr", "start", "end", "gene")) %>% 
+    .[, chr := gsub("chr", "", chr) %>% as.factor()]
+}
+
+load_met = function(file, anno){
+  # reads in methylation data from .rds or .csv then adds gene names from annotation file
+  if(grepl(".rds", file)){
+    dt = readRDS(file)
+  } else {
+    dt = fread(file)
+  }
+  cols = colnames(dt)
+  if(any(cols %in% "sample")) setnames(dt, "sample", "cell")
+  setkey(dt, chr, start, end)
+  merge(dt, anno %>% setkey(chr, start, end)) %>%
+  .[, c("chr", "start", "end") := NULL]
+  
+}
+
+calc_pca = function(x, scale = TRUE){
+  d = as.matrix(x)
+  d = scale(d, center = TRUE, scale = scale)
+  d = t(d)
+  s = svd(d)
+  vec = s$u
+  rownames(vec) = rownames(d)
+  val = s$d**2 / sum(s$d**2)
+  return(list(vectors = vec, values = val))
+}
+
+```
+
+
+```{r pca}
+# This study and Angermueller 2016 are aligned to the mm10 genome build whereas Smallwood 2014 and Ficz are aligned to mm9. We load these annotations and label each locus in our data by ensembl id (instead of genomic coordinates which were used to label loci in the preprocessing steps).
+mm10 = load_anno(io$mm10)
+mm9 = load_anno(io$mm9, select = c(1:3, 5))
+
+# load names of cells which pass QC
+cells = fread(io$qc) %>% 
+  .[qc == TRUE, paste0(cell, "_-_", dataset)]
+
+# load data from each study
+
+dat = list(io$nmt, io$mt, io$scbs, io$bulk) %>% 
+  map2(list(mm10, mm10, mm9, mm9), ~load_met(.x, .y)) %>% 
+  map2(list("This Study", "Angermueller 2016", "Smallwood 2014", "Ficz 2013"), ~.x[, study := .y]) %>% 
+  rbindlist() %>% 
+  # filter cells
+  .[, cell_id := paste0(cell, "_-_", study)] %>% 
+  .[cell_id %in% cells]
+
+
+# impute missing data from mean rate accross cells
+
+dat = dcast(dat, gene ~ cell_id, value.var = "rate") %>% 
+  melt(id.vars = "gene", variable.name = "cell", value.name = "rate") %>% 
+  .[, mean := mean(rate, na.rm = TRUE), gene] %>% 
+  .[is.na(rate), rate := mean]
+
+# PCA
+
+pca = dcast(dat, gene ~ cell, value.var = "rate") %>%
+  .[, c("gene") := NULL] %>%
+  calc_pca()
+
+pca$vectors = as.data.table(pca$vectors, keep.rownames = "cell") %>%
+  separate(cell, c("cell", "dataset"), sep = "_-_") %>% 
+  setkey(cell, dataset) %>% 
+  merge(fread(io$qc) %>% setkey(cell, dataset))
+
+
+
+p = ggplot(pca$vectors, aes(V1, V2)) +
+  geom_point(aes(colour = dataset, shape = culture)) +
+  xlab(paste0("PC1 (", round(100*pca$values[1]), " %)")) +
+  ylab(paste0("PC2 (", round(100*pca$values[2]), " %)"))
+ 
+p
+save_plot("figs/pca_meth.pdf", p, base_width = 7)
+```
+
+
+
+
+
+
+
+
+
+
+
+

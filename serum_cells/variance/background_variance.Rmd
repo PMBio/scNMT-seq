@@ -1,0 +1,279 @@
+---
+title: "Variance against background"
+author: "Stephen Clark"
+date: "12 October 2017"
+output: html_document
+---
+This script calculates cell-to-cell variances in methylation and accessibility at each locus of each feature set. It compares variances to background levels by calculating cell-to-cell variances in 
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(data.table)
+library(purrr)
+library(Rsamtools)
+library(ggplot2)
+library(cowplot)
+
+io = list(anno_dir = "data/anno/",
+          data_dir = "/bi/sequencing/Sample_4129_EB_d3_NOMe_first48"
+          )
+
+opts = list(n_perms = 1e4
+            )
+
+```
+
+```{r functions}
+#funtions
+fread_anno = function(file){
+  fread(file, select = 1:3, colClasses = list("chracter" = 1)) %>%
+    setnames(c("chr", "start", "end")) %>%
+    .[, chr := str_replace(chr, "chr", "")] %>%
+    .[, anno := str_replace_all(file, "data/anno/|.bed", "")] %>%
+    .[, id := paste(chr, start, end, sep = "_")]    
+}
+
+fread_met = function(cell, context = "GpC_report", files = files){
+  f = grep(cell, files)  %>% 
+    files[.] 
+  f = grep(context, f) %>%
+    f[.] %>%
+    paste0("zcat ", .)
+  map(f, function(x){
+    fread(x, select = c(1:2, 4:5)) %>%
+      .[V4 + V5 >0]
+  }) %>%
+    rbindlist() %>%
+    .[, map(.SD, sum), .(V1, V2)] %>%
+    .[, rate := 100 * (V4 / (V4 + V5))] %>%
+    .[, c("V4", "V5") := NULL] %>%
+    setnames(c("V1", "V2"), c("chr", "start")) %>%
+    .[, cell := cell]  %>%
+    .[, end := start]
+}
+
+quant_met = function(met, anno){
+  setkey(met, chr, start, end)
+  foverlaps(met, anno %>% setkey(chr, start, end), nomatch = 0) %>%
+    .[, .(rate = mean(rate), .N), .(chr, start, end, anno, id, cell)]
+}
+
+quant_random = function(locus, random_anno, raw_data, temp_dir = "variance/tmp/acc/"){
+  dt = random_anno[id %in% locus] %>%
+    .[, .(start = runif(n_perms, min, max) %>% round), .(chr, id, len, anno)] %>%
+    .[, end := start + len]
+  len = dt[1, len]
+  dt = quant_met(raw_data, dt) %>%
+    .[, .(var = var(rate)), .(chr, start, end)] %>%
+    .[, len := len] %>%
+    .[, c("chr", "start", "end") := NULL] %>%
+    setkey(var) %>%
+    .[complete.cases(.)] %>%
+    .[, rank := 1: .N]
+  fwrite(dt, paste0(temp_dir, len, ".csv"))
+}
+
+p_vs_back = function(var, bk){
+  sum(var > bk) / length(bk)
+}
+```
+
+```{r load_anno}
+# load annotation and setup dt for random annotations
+anno = anno_dir %>%
+  paste0(., list.files(.)) %>%
+  map(fread_anno) %>%
+  rbindlist()
+
+minmax = anno[, .(min = min(start), max = max(end)), chr]
+
+random_anno = anno[, .(id = id, chr = chr, len = end - start, anno = anno)] %>%
+  setkey(chr) %>%
+  merge(minmax %>% setkey(chr)) 
+
+# round region lengths to 2 sf then select unique lengths only
+random_anno = random_anno[, len := signif(len, digits = 2)]
+
+loci = random_anno[, .(id, len)] %>%
+  setkey(len) %>%
+  unique(by = "len") %>%
+  .[, id]
+```
+
+```{r load_data}
+# find all bismark report files in dir
+files = list.files(io$data_dir, pattern = "report.txt.gz", full.names = TRUE, recursive = TRUE)
+
+#names of cells which pass QC
+cells = fread("data/eb_sample_sheet.csv") %>%
+  .[pass_metQC == TRUE & pass_accQC == TRUE & pass_rnaQC == TRUE, sample] 
+
+### accessibility ###
+
+# load raw accessibility data
+raw_acc = map(cells, fread_met, "GpC_report", files) %>%
+  rbindlist()
+
+# for each locus, generate X number of random loci of the same size
+# quantify rates over these loci and calc variance
+
+# this creates a large volume of data so save each as a temp file first
+
+
+dir.create("variance/tmp/acc/", recursive = TRUE, showWarnings = FALSE)
+
+walk(loci, quant_random, random_anno, raw_acc, temp_dir = "variance/tmp/acc/") 
+  
+# now calculate observed variance
+acc_var = quant_met(raw_acc, anno) %>%
+  .[, .(var = var(rate), .N), .(chr, start, end, id, anno)] %>%
+  setkey(id, anno) 
+
+fwrite(acc_var, "variance/fore_acc.csv")
+
+
+rm(raw_acc)
+
+
+### methylation ###
+
+raw_met = map(cells, fread_met, "CpG_report", files) %>%
+  rbindlist()
+
+dir.create("variance/tmp/met/", recursive = TRUE, showWarnings = FALSE)
+
+# background var
+walk(loci, quant_random, random_anno, raw_acc, temp_dir = "variance/tmp/met/") 
+
+# observed var
+met_var = quant_met(raw_met, anno) %>%
+  .[, .(var = var(rate), .N), .(chr, start, end, id, anno)] 
+
+fwrite(met_var, "variance/fore_met.csv")
+
+rm(raw_met)
+
+################## difference between obeserved and background ##########################
+
+met_var = fread("variance/fore_met.csv", select = 4:7) %>%
+  tidyr::separate(id, c("chr", "start", "end"), remove = FALSE) %>%
+  copy() %>%
+  .[, len := as.numeric(end) - as.numeric(start)] %>%
+  .[, len := signif(len, digits = 2)] %>%
+  .[, c("chr", "start", "end") := NULL] %>%
+  .[complete.cases(var)] %>%
+  setkey(len) 
+
+lengths = random_anno[, unique(len)]
+dir = "variance/tmp/met/"
+
+lengths = list.files(dir) %>%
+  gsub(".csv", "", .) %>%
+  as.numeric()
+
+met_vs_back = map(lengths, function(x){
+  bk = paste0(dir, x, ".csv") %>%
+    fread(select = 1) %>%
+    .[, var]
+  met_var[len == x] %>%
+    .[, .(rank = p_vs_back(var, bk)), .(id, anno)]
+    
+}) %>%
+  rbindlist()
+
+ggplot(met_vs_back, aes(anno, rank, fill = anno)) + geom_boxplot() + coord_flip()
+```
+# Methylation variance compared to background
+```{r met}
+met_with_back = map(lengths, function(x){
+  bk = paste0(dir, x, ".csv") %>%
+    fread(select = 1:2) %>%
+    .[, .(back_var = mean(var)), len]
+}) %>%
+  rbindlist() %>%
+  setkey(len) %>%
+  merge(met_var %>% setkey(len)) %>%
+  .[, enrichment := var / back_var] %>%
+  melt(id.vars = c("id", "anno", "enrichment"), measure.vars = c("var", "back_var"))
+
+p1 = ggplot(met_with_back, aes(anno, value, fill = variable)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  coord_flip()
+p2 = ggplot(met_with_back, aes(anno, enrichment, fill = anno)) + 
+  geom_boxplot(outlier.shape = NA) + coord_flip(ylim = c(0, 5)) + 
+  geom_hline(yintercept = 1)
+p1
+p2
+```
+# Accessibility variance compared to background
+```{r acc}
+acc_var = fread("variance/fore_acc.csv", select = 4:7) %>%
+  tidyr::separate(id, c("chr", "start", "end"), remove = FALSE) %>%
+  copy() %>%
+  .[, len := as.numeric(end) - as.numeric(start)] %>%
+  .[, len := signif(len, digits = 2)] %>%
+  .[, c("chr", "start", "end") := NULL] %>%
+  .[complete.cases(var)] %>%
+  setkey(len) 
+
+
+dir = "variance/tmp/acc/"
+lengths = list.files(dir) %>%
+  gsub(".csv", "", .) %>%
+  as.numeric()
+
+
+acc_vs_back = map(lengths, function(x){
+  bk = paste0(dir, x, ".csv") %>%
+    fread(select = 1) %>%
+    .[, var]
+  var = acc_var[len == x] %>%
+    .[, .(rank = p_vs_back(var, bk)), .(id, anno)]
+  
+}) %>%
+  rbindlist()
+
+ggplot(acc_vs_back, aes(anno, rank, fill = anno)) + 
+  geom_boxplot() + 
+  coord_flip()
+
+```
+```{r}
+acc_with_back = map(lengths, function(x){
+  bk = paste0(dir, x, ".csv") %>%
+    fread(select = 1:2) %>%
+    .[, .(back_var = mean(var)), len]
+}) %>%
+  rbindlist() %>%
+  setkey(len) %>%
+  merge(acc_var %>% setkey(len)) %>%
+  .[, enrichment := var / back_var] %>%
+  melt(id.vars = c("id", "anno", "enrichment"), measure.vars = c("var", "back_var"))
+
+p3 = ggplot(acc_with_back, aes(anno, value, fill = variable)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  coord_flip(ylim = c(0, 3000))
+p4 = ggplot(acc_with_back, aes(anno, enrichment, fill = anno)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  coord_flip(ylim = c(0, 2.5)) + 
+  geom_hline(yintercept = 1)
+
+p3
+p4
+
+#save plots
+save_plot("plots/met_var.pdf", p1, base_width = 7, base_height = 10)
+save_plot("plots/met_enrichment.pdf", p2, base_width = 10, base_height = 10)
+save_plot("plots/acc_var.pdf", p3, base_width = 7, base_height = 10)
+save_plot("plots/acc_enrichment.pdf", p4, base_width =10, base_height = 10)
+
+
+```
+
+
+
+
+
+
+
+
+

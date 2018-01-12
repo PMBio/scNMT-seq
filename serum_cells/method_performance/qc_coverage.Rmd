@@ -1,0 +1,276 @@
+---
+title: "Quality control of BS-seq data: genome wide coverage"
+author: "Stephen Clark"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(data.table)
+library(purrr)
+library(tidyr)
+library(ggplot2)
+library(cowplot)
+library(scales)
+library(Biostrings)
+library(BSgenome.Mmusculus.UCSC.mm10)
+
+# set data files and folders
+io = list(feat_file = "data/feats_all.csv",
+          qc_file = "data/qc.txt",
+          quant_met = "data/quant/met.csv",
+          quant_dna = "data/quant/dna.csv",
+          raw_met = "data/raw_met/",
+          raw_mtseq = "data/mtseq/",
+          out_dir = "output/",
+          plots_dir = "figs/"
+          ) 
+
+walk(io, dir.create, showWarnings = FALSE, recursive = TRUE) # create dirs if they don't exist
+
+# options
+opts = list(cov_cutoff = 5, # only keep loci with >= number of C's 
+            feat_sub = c("prom", "genebody", "active_enhancers" , "p300", "CGI"),
+            feat_all = c("Nanog", "super_enhancers", "DHS", "Oct4" , "prom_cgi", "prom_noncgi", 
+                         "prom_poised",  "prom_inactive", "primed_enhancers", "prom_active" , 
+                         "CTCF", "introns", "exons"  ),
+            # this specifies the trinucleotides that can be assayed using the different methods
+            trinucleotides = list(nome_cg = c("ACG", "TCG"),
+                                  all_cg = c("CCG", "GCG", "ACG", "TCG"),
+                                  nome_gc = c("GCA", "GCC", "GCT")),
+            plot_colours = c("#00BFC4", "#F8766D", "#B4B4B4"),
+            downsamp = c(1:10),
+            feat_downsamp = c("active_enhancers", "CGI", "CTCF", "DHS", "genebody", "IAP", "Nanog", 
+                              "Oct4", "p300", "primed_enhancers", "super_enhancers", "prom", "exons", "introns")
+            )
+
+
+
+```
+
+```{r functions}
+
+
+find_seq_chr = function(chr, seq){
+  # find every position in specified chromosome in mouse genome with specified sequence
+  matchPattern(seq, Mmusculus[[chr]]) %>% 
+    .@ranges %>% 
+    .@start %>% 
+    data.table(tri = seq, chr = chr, start = .)
+}
+
+count_seq = function(seq, feat) {
+  # count number of instances of a given sequence within specified features
+  setkey(feat, chr, start, end)
+  paste("chr", c(1:19,"X","Y"), sep="") %>% 
+    map(~find_seq_chr(., seq) %>% 
+          .[, end := start + 3] %>% 
+          .[, chr := gsub("chr", "", chr)] %>% 
+          setkey(chr, start, end) %>% 
+          foverlaps(feat, nomatch = 0) %>% 
+          .[, .N, .(chr, start, end, feat, tri)]) %>% 
+    rbindlist()
+}
+        
+
+calc_max_coverage = function(seq_groups, feat, cov_cutoff){
+  # count number of loci covered at particular coverage cutoff given a list of groups of sequences e.g. WCG, CG etc.
+  setkey(feat, chr, start, end)
+  seq_groups %>% 
+    unlist() %>% 
+    unique() %>% 
+    map(count_seq, feats) %>% 
+    rbindlist() %>% 
+    #create a column for each seq_group and copy the coverage IF the sequence is part of that group
+    .[, c(names(seq_groups)) := map(seq_groups, ~ (tri %in% .) %>% as.numeric())] %>% 
+    .[, map(.SD, ~ N * .), .(feat, chr, start, end), .SDcol = c(names(seq_groups))] %>% 
+    .[, map(.SD, sum), .(feat, chr, start, end)] %>% 
+    melt(id.vars = c("feat", "chr", "start", "end"), value.name = "N", variable.name = "group") %>% 
+    #filter out loci below coverage cutoff
+    .[N >= cov_cutoff] %>% 
+    #count the number of positions covered per feature per group
+    .[, .N, .(feat, group)]
+    
+}
+
+downsample = function(x, depth) {
+  dt = map(depth, ~x[sample(1:nrow(x), nrow(x)/.)][ , downsample := .]) %>% 
+    rbindlist()
+}      
+        
+
+```
+
+# Theoretical CpG coverage
+
+Each feature set contains a maximum number of CpG sites that can be covered by traditional BS-seq and by NOMe-seq (which has to exclude C-C-G and G-C-G trinucleotides). Here we calculate how many C's are at each loci and in each context then calculate how many loci can be covered at the given coverage cutoff (5 C's or more).
+
+
+```{r calc_max_coverage}
+
+feats = fread(io$feat_file, colClasses = list("character" = 1)) %>% 
+  setkey(chr, start, end)
+
+coverage = calc_max_coverage(opts$trinucleotides, feats, opts$cov_cutoff) %>% 
+  setkey(feat) %>% 
+  .[feats[, .N, feat] %>% setkey(feat)] %>% 
+  .[, perc_cov := 100 * N/i.N]
+
+coverage_file = paste0(io$out_dir, "theoretical_cov_trinucleotides.csv")
+fwrite(coverage, coverage_file)  
+```
+
+## Plot a subset of features
+
+```{r plot_max_coverage}
+coverage[, group := factor(group, levels = c("nome_gc", "nome_cg", "all_cg"))] %>% 
+  .[, feat := factor(feat, levels = .[, min(perc_cov), feat][order(-rank(V1)), feat])]
+
+p = ggplot(coverage[feat %in% opts$feat_sub], aes(feat, perc_cov, fill = group)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  coord_flip() +
+  ylab("Theoretical coverage") +
+  xlab("Genomic feature") +
+  theme(legend.title=element_blank()) +
+  scale_fill_manual(values = opts$plot_colours)
+  
+
+p
+save_plot(paste0(io$plots_dir, "theoretical_cov.pdf"), p)
+
+
+```
+
+## Plot all features
+
+```{r plot_max_coverage_all}
+
+
+p = ggplot(coverage[feat %in% opts$feat_all], aes(feat, perc_cov, fill = group)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  coord_flip() +
+  ylab("Theoretical coverage") +
+  xlab("Genomic feature") +
+  theme(legend.title=element_blank()) +
+  scale_fill_manual(values = opts$plot_colours)
+  
+
+p
+save_plot(paste0(io$plots_dir, "theoretical_cov_all.pdf"), p)
+
+
+```
+
+# Actual coverage in scNMT-seq data
+
+Calculate number of loci covered at coverage cutoff for each feature type in each cell. 
+
+Express as a percentage of the total number of loci that could possibly be covered at that coverage cutoff.
+
+```{r calc_real_coverage}
+
+
+# load only cells that pass qc
+qc = fread(io$qc_file) %>% 
+  .[type == "NMT" & passQC_met == TRUE & passQC_rna == TRUE, sample]
+
+actual_cov = list(met = io$quant_met, dna = io$quant_dna) %>% 
+  map2(names(.), ~fread(.x) %>% .[, context := .y]) %>% 
+  rbindlist() %>% 
+  .[cell %in% qc] %>% 
+  .[N >= opts$cov_cutoff] %>% 
+  .[, .N, .(feat, context, cell)] %>% 
+  setkey(feat, context) %>% 
+  # calculate coverage as percentage of total sites
+  merge(coverage %>% 
+      setkey(group) %>% 
+      rbind(.["nome_cg", context := "met"],
+            .["nome_gc", context := "dna"]) %>% 
+      setkey(feat, context),
+      allow.cartesian = TRUE) %>% 
+  .[, perc_cov := 100 * (N.x / N.y)]
+  
+```
+
+## Plot a subset of features
+
+```{r plot_real_coverage}
+actual_cov[, group := factor(group, levels = c("nome_gc", "nome_cg"))] %>% 
+  .[, feat := factor(feat, levels = coverage[, min(perc_cov), feat][order(-rank(V1)), feat])]
+
+p = ggplot(actual_cov[feat %in% opts$feat_sub], aes(feat, perc_cov, fill = group)) +
+  geom_boxplot(outlier.shape = NA) +
+  coord_flip() +
+  ylab("Percentage of loci covered with at least 5 cytosines") +
+  xlab("Genomic Feature") +
+  theme(legend.title=element_blank())+
+  scale_fill_manual(values = opts$plot_colours[3:2])
+
+save_plot(paste0(io$plots_dir, "actual_cov.pdf"), p)  
+p
+
+
+```
+
+## Plot all features
+
+```{r plot_real_coverage_all}
+p = ggplot(actual_cov[feat %in% opts$feat_all], aes(feat, perc_cov, fill = group)) +
+  geom_boxplot(outlier.shape = NA) +
+  coord_flip() +
+  ylab("Percentage of loci covered with at least 5 cytosines") +
+  xlab("Genomic Feature") +
+  theme(legend.title=element_blank())+
+  scale_fill_manual(values = opts$plot_colours[3:2])
+
+save_plot(paste0(io$plots_dir, "actual_cov_all.pdf"), p)  
+p
+
+
+```
+# Coverage downsampling
+Plot the effect of reduced sequencing depth on coverage. 
+
+Compare to M&T-seq data (Angermueller 2016) which includes all CpG sites (not just A-C-G and T-C-G). 
+
+Compare two cells with equivalent numbers of unqiue mapped reads (F05 from NMTseq, A02 from M&T-seq).
+
+```{r calc_downsample}
+raw = list(io$raw_met, io$raw_mtseq) %>% 
+  map2(c("F05", "A02"), ~paste0(.x, list.files(.x, pattern = .y))) %>% 
+  map(fread) %>% 
+  map2(c("scNMT-seq", "scM&T-seq"), ~.x[, cell := .y]) %>% 
+  map(downsample, opts$downsamp) %>% 
+  rbindlist() %>% 
+  setnames(c("chr", "start", "rate", "cell", "downsample")) %>% 
+  .[, end := start] %>% 
+  setkey(chr, start, end) %>% 
+  foverlaps(feats %>% setkey(chr, start, end)) %>% 
+  .[, .N, .(chr, start, end, feat, cell, downsample)] %>% 
+  .[N >= opts$cov_cutoff] %>% 
+  .[, .N, .(feat, cell, downsample)] %>% 
+  setkey(feat) %>% 
+  merge(coverage[group=="all_cg", .(N, feat)] %>% setkey(feat)) %>% 
+  .[, perc := 100*(N.x / N.y)]
+
+summary = raw[, mean(perc), .(feat, cell, downsample)] %>% 
+  dcast(feat + downsample ~ cell, value.var = "V1") %>% 
+  .[, difference := `scM&T-seq` - `scNMT-seq`] %>% 
+  .[downsample %in% c(1, 10)]
+summary
+```
+
+```{r plot_downsample}
+p = ggplot(raw[feat %in% opts$feat_downsamp], aes(downsample, perc, colour = cell)) +
+  geom_line() +
+  facet_wrap(~feat) +
+  xlab("Downsampling factor") +
+  ylab("Percentage of loci covered")
+save_plot(paste0(io$plots_dir, "downsampled_cov.pdf"), p, base_width = 10, base_height = 10)  
+p
+```
+
+
+
+

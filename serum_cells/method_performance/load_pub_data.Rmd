@@ -1,0 +1,119 @@
+---
+title: "Load published data"
+author: "Stephen Clark"
+date: "12 October 2017"
+output: html_document
+---
+
+This script loads published data and quantitates methylation rates for each cell over gene bodies for the purposes of comparing with our data. Published data is available from GEO (Smallwood 2014 = " GSE56879", Angermueller 2016 = "GSE74535" and Ficz 2013 = "GSE42923").
+
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(data.table)
+library(purrr)
+
+io = list(mm10_anno = "data/feat/ricard/genebody.bed",
+          mm9_anno = "data/feat/ricard/mm9/genebody.bed",
+          mt_seq = c("/bi/sequencing/Sample_2804_CSC_BS-Seq_I/Lane_3805_CSC_BS-Seq_I/Aligned/",
+                     "/bi/sequencing/Sample_2805_CSC_BS-Seq_II/Lane_3806_CSC_BS-Seq_II/Aligned/",
+                     "/bi/sequencing/Sample_2806_CSC_BS-Seq_III/Lane_3807_CSC_BS-Seq_III/Aligned/",
+                     "/bi/sequencing/Sample_2807_CSC_BS-Seq_IV/Lane_3808_CSC_BS-Seq_IV/Aligned/",
+                     "/bi/sequencing/Sample_2808_CSC_BS-Seq_V/Lane_3809_CSC_BS-Seq_V/Aligned/"),
+          scbs = c("/bi/sequencing/Sample_1427_9N_single_cells_1",
+                   "/bi/sequencing/Sample_1428_9N_single_cells_2",
+                   "/bi/sequencing/Sample_1429_9N_single_cells_3",
+                   "/bi/sequencing/Sample_1430_9N_single_cells_-_merged_1",
+                   "/bi/sequencing/Sample_1431_9N_single_cells_-_merged_2" ,
+                   "/bi/sequencing/Sample_1432_9N_single_cells_-_merged_3"),
+          bulk = "/bi/pubcache/Babraham_data_submissions/Ficz_2i_submission"
+          )
+
+
+```
+
+
+
+```{r functions}
+load_anno = function(file){
+  fread(file, select = 1:3) %>% 
+    setnames(c("chr", "start", "end")) %>% 
+  .[, chr := gsub("chr", "", chr)]
+}
+
+find_files = function(dirs, pattern = "bismark.cov", cell_id = 12){
+  f = map(dirs, list.files, pattern = pattern, recursive = TRUE, full.names = TRUE) %>% 
+    unlist()
+  cells = unlist(map(strsplit(f, split = "_"), ~.[cell_id]))
+  data.table(file = f, cell = cells, read = c("R1", "R2")) %>% 
+    dcast(cell ~ read, value.var = "file")
+}
+
+load_met = function(file1, file2, cell_id, anno){
+  map(list(file1, file2), fread, select = c(1:2, 5:6)) %>% 
+    rbindlist() %>% 
+    setnames(c("chr", "start", "met", "un")) %>% 
+    # calculate mean rate per position
+    .[, map(.SD, sum), .(chr, start)] %>% 
+    .[, .(rate = met / (met + un)), .(chr, start)] %>% 
+    .[, end := start] %>%
+    setkey(chr, start, end) %>% 
+    foverlaps(anno %>% setkey(chr, start ,end), nomatch = 0) %>% 
+    .[, .(rate = mean(rate), .N), .(chr, start, end)]
+    .[, cell := cell_id]
+}
+```
+
+Read in data and quantitate over gene bodies  
+
+
+```{r mt_seq}
+
+
+mm10 = load_anno(io$mm10_anno)
+mm9 = load_anno(io$mm9_anno)
+
+
+files = find_files(io$mt_seq)
+mt_seq = map(1:nrow(files) ~load_met(files[., R1], files[., R2], files[., cell], mm10)) %>% 
+  rbindlist()
+
+
+saveRDS(mt_seq, "data/MnTseq/mt_genes.rds")
+
+
+```
+
+
+```{r scbs}
+
+files = find_files(io$scbs)
+scbs = map(1:nrow(scbs_files) ~load_met(files[., R1], files[., R2], files[., cell], mm9)) %>% 
+  rbindlist()
+
+
+saveRDS(scbs, "data/scBS/scBS_genes.rds")
+
+
+```
+
+```{r bulk}
+
+files = find_files(io$mt_seq)
+bulk = map(1:nrow(files) ~load_met(files[., R1], files[., R2], files[., cell], 9)) %>% 
+  rbindlist()
+
+
+saveRDS(bulk, "data/bulk/bulk_genes.rds")
+
+
+```
+
+
+
+
+
+
+
+
+

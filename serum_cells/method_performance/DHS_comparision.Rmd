@@ -1,0 +1,149 @@
+---
+title: "QC of accessibility data: comparision to published DNAse-seq (Encode)"
+author: "Stephen Clark"
+date: "03/31/2017"
+output: html_document
+---
+
+This script compares our accessibility data (all cells merged) to published accessibility data (Dnase-seq from Encode).
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(data.table)
+library(purrr)
+library(Rsamtools)
+library(ggplot2)
+library(cowplot)
+library(RColorBrewer)
+library(weights)
+
+io = list(acc_dir = "data/raw_dna/",
+          bam_file = "data/dhs/129_DHS_bamfile.bam"
+          )
+  
+
+
+opts = list(win_len = 10000,
+            win_num = 100000,
+            chrs = c(1:19, "X"),
+            log_dhs = TRUE,
+            cutoff = 1000
+            )
+
+
+
+```
+
+### Generate pseudo-bulk accessibility data
+Ricard has merged genotypes in raw data. Load each cell and calculate mean accessibility rates per position to create a pseudo-bulk dataset.
+
+
+```{r, eval = FALSE}
+#dat = list.files(io$acc_dir, full.names = TRUE) %>% 
+#  map(fread) %>% 
+#  rbindlist() %>% 
+#  .[, .(rate = mean(rate), .N), .(chr, pos)] %>% 
+#  setnames("pos", "start") %>% 
+#  .[, end := start]
+
+#fwrite(dat, "data/pseudo_bulk_gc.csv")
+
+```
+
+
+###DNase-seq  
+Load BAM files from Encode DNase-seq data. Quantitate over random probes.  
+
+```{r}
+
+param = ScanBamParam(what = c("rname", "pos", "qwidth"))
+dhs_data = scanBam(file = io$bam_file, param = param) %>% 
+  .[[1]] %>% 
+  as.data.table() %>% 
+  setnames(c("chr", "start", "end")) %>%
+  .[, end := start + end] %>% 
+  .[, chr := gsub("chr", "", chr)] %>% 
+  .[chr %in% opts$chrs] %>% 
+  .[complete.cases(.)]
+
+# generate random probes
+wins = dhs_data[, .(min = min(start), max = max(end)), chr] %>% 
+  .[complete.cases(.)] %>% 
+  .[, size := as.double(max - min)] %>% 
+  .[, win_num := round(opts$win_num * size / sum(size))] %>% 
+# multiply number of windows by number of window lengths to be used
+  .[, win_num := win_num * length(opts$win_len)] %>% 
+  .[, .(start = runif(win_num, min, max)), chr] %>% 
+  .[, win_len := opts$win_len] %>% 
+  .[, end := start + win_len]
+
+#Quantitate DNase data (count the number of reads in each window)
+
+setkey(wins, chr, start ,end)
+setkey(dhs_data, chr, start, end)
+dhs_data = foverlaps(dhs_data, wins, nomatch = 0) %>% 
+  .[, .(dhs = .N), .(chr, start, end, win_len)] %>% 
+  .[, dhs := dhs / opts$win_len]
+
+if(opts$log_dhs) dhs_data[, dhs := log2(dhs)]
+
+```
+
+Quantify GpC accessibility data from pseudo-bulk sample over the same windows as the DNase data.
+
+```{r}
+dat = fread("data/pseudo_bulk_gc.csv") %>% 
+  setkey(chr, start, end) %>% 
+  foverlaps(wins %>% setkey(chr, start, end), nomatch = 0) %>% 
+  .[, .(gc = mean(rate), .N), .(chr, start, end)] %>% 
+  setkey(N) %>% 
+  .[N >= opts$cutoff] %>% 
+# merge with DHS data
+  setkey(chr, start ,end) %>% 
+  merge(dhs_data %>% setkey(chr, start, end))
+
+
+```
+
+
+
+
+```{r}
+
+rf = colorRampPalette(rev(brewer.pal(11,'Spectral')))
+r = rf(32)
+
+ 
+
+
+label = dat[, wtd.cor(dhs, gc, N)[1]] %>%
+  round(2) %>%
+  paste0("Weighted Pearson R = ", .)
+
+#x = dat[, max(dhs)*0.25]
+x = -5
+y = 45
+#y = dat[, max(gc)*0.75]
+
+p = ggplot(dat, aes(dhs, gc)) + 
+  stat_bin2d(bins=100) + 
+  scale_fill_gradientn(colours=r) +
+  annotate("text", x = x, y = y, label = label) +
+  ylab("scNMT-seq accessibility rate") +
+  xlab("DNase-seq log normalised counts") 
+p
+
+
+save_plot("figs/dnase_scatter_log2_per10k_100bins.pdf", p)
+  ```
+
+
+
+
+
+
+
+
+
+
+
