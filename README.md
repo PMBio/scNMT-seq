@@ -21,8 +21,7 @@ Content
 
 Data
 -------
-The raw data is accessible at GEO (to-do: add link...).
-The parsed data is provided upon request.
+The raw data is accessible at GEO [GSE109262](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE109262). Parsed data is provided upon request.
 
 Contact
 -------
