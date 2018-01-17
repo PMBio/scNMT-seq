@@ -1,7 +1,7 @@
 scNMT-seq
 =========
 
-Source code of the manuscript ***Joint profiling of chromatin accessibility, DNA methylation and transcription in single cells*** ([bioRxiv](biorxiv.org/content/early/2017/05/17/138685)).
+Source code of the manuscript ***Joint profiling of chromatin accessibility, DNA methylation and transcription in single cells***.
 
 Abstract
 --------
