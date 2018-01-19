@@ -27,3 +27,8 @@ Contact
 -------
 * Computational analysis: Ricard Argelaguet (ricard@ebi.ac.uk) or Andreas Kapourani (c.a.kapourani@ed.ac.uk)
 * Experimental protocol: Stephen Clark (stephen.clark@babraham.ac.uk)
+
+Slack group
+-------
+We have created a Slack group to discuss ideas, suggestions and collaborations about scNMT-seq. [This is the link](https://join.slack.com/t/scnmt-seq/shared_invite/enQtMzAyMDAzNjA3NDc3LWFlMThkY2RhOGQ3ZWQzMTk1MjEyYTNhNzIwZTU5MTJhNDAxYjFjZTQ1NWFiMTAxYjBkMTFiMzBiOWMwYzUyNTU), feel free to join and talk to us!
+
