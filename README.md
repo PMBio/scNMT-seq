@@ -16,7 +16,7 @@ For more details you can read our preprint: https://www.biorxiv.org/content/earl
 Content
 -------
 * `/serum_cells/`: analysis done on ~100 embryonic stem cells under serum conditions
-* `/EB_cells/`: analysis done on ~50 embryonic body cells
+* `/EB_cells/`: analysis done on ~50 embryoid body cells
 
 
 Data
